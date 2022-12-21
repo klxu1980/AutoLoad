@@ -55,12 +55,6 @@ class LoadStage(Enum):
     UPLOAD_COMPLETED   = 4    # 开卷完成
 
 
-class AimingStatus(Enum):
-    OK       = 0,
-    TOO_LOW  = -1,
-    TOO_HIGH = 1
-
-
 class AutoLoader(object):
     def __init__(self):
         # self.coil_tracer是核心跟踪器
@@ -81,26 +75,24 @@ class AutoLoader(object):
         self.coil_open_status.init_model()
         self.coil_open_status.load_model("开卷检测2020-10-24-12-12.pt")
 
-        # 上卷各个阶段
-        self.loading_stage = LoadStage.WAITING_4_LOADING
-        #self.unpacker_aiming_begin = (1450, 1450)  # 带卷对准开卷机的检测开始和停止位置
-        #self.unpacker_aiming_end = 1250
+        # 以下变量主要在demo中使用到
+        self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
+        self.proc_time = 0.0                                 # 自动上卷算法处理时间
 
-        self.aiming_ok_line = None
-        self.aiming_low_line = None
-        self.aiming_high_line = None
-
-        self.proc_time = 0.0
-
-        self.video = None
-        self.csv = None
+        # 试验测试中，如果需要存储每个视频的带卷轨迹数据，则设置save_trace=True
         self.save_trace = False
+        self.csv = None
 
+        # 保存带卷轨迹跟踪视频
+        self.default_saving_path = "d:\\"
         self.saving_video = False
         self.video_save = None
         self.paused = False
-        self.coil_top = None
 
+        # 带卷对准开卷机时的轨迹线
+        self.aiming_ok_line = None
+        self.aiming_low_line = None
+        self.aiming_high_line = None
         self.load_aiming_lines()
 
     @staticmethod
@@ -137,8 +129,8 @@ class AutoLoader(object):
             if self.video_save is None:
                 datetime_str = self.datetime_string()
                 size = (frame.shape[1], frame.shape[0])
-                self.video_save = cv2.VideoWriter("d:\\" + datetime_str + ".mp4", cv2.VideoWriter_fourcc(*'MP4V'), 10,
-                                                  size)
+                self.video_save = cv2.VideoWriter(self.default_saving_path + datetime_str + ".mp4",
+                                                  cv2.VideoWriter_fourcc(*'MP4V'), 10, size)
             self.video_save.write(frame)
             self.show_text(frame, "recording video", pos=(600, 40), color=(0, 0, 255))
         else:
@@ -247,15 +239,19 @@ class AutoLoader(object):
         return status
 
     def init_one_test_cycle(self, file_name):
-        self.video = VideoPlayer(file_name)
         self.init_one_cycle()
 
+        # 打开视频文件
+        # 如果需要保存轨迹，则建立新的csv文件
+        video = VideoPlayer(file_name)
+        if self.save_trace:
+            csv_file = open(video.file_name + "_new.csv", "w", newline='')
+            self.csv = csv.writer(csv_file)
+
+        # 新视频打开后，默认不保存跟踪视频，除非按下'S'键
         self.saving_video = False
         self.paused = False
-
-        if self.save_trace:
-            csv_file = open(self.video.file_name + "_new.csv", "w", newline='')
-            self.csv = csv.writer(csv_file)
+        return video
 
     def control_demo(self, frame):
         start_time = time.perf_counter()
@@ -312,17 +308,17 @@ class AutoLoader(object):
         return frame
 
     def test_demo(self, video_file_name):
-        self.init_one_test_cycle(file_name=video_file_name)
-        while self.video is not None and not self.video.is_end():
+        video = self.init_one_test_cycle(file_name=video_file_name)
+        while video is not None and not video.is_end():
             # 从摄像头或文件中读取帧，调整尺寸并灰度化
-            frame = self.video.get_frame()
+            frame = video.get_frame()
             frame_4_proc = frame.copy()
 
             self.control_demo(frame=frame_4_proc)
             frame = self.show_loading_info(frame)
 
             # 显示当前帧
-            self.show_text(frame, "frame count = %d, current frame = %d" % (self.video.frame_cnt, self.video.cur_frame),
+            self.show_text(frame, "frame count = %d, current frame = %d" % (video.frame_cnt, video.cur_frame),
                            (20, 140))
 
             # 显示操作按键
@@ -359,7 +355,7 @@ class AutoLoader(object):
                 break
 
             if not self.paused:
-                self.video.forward()
+                video.forward()
 
 
 def file_name(file_dir):
