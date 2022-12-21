@@ -1,4 +1,5 @@
 import cv2
+import torch
 import numpy as np
 from filterpy.kalman import KalmanFilter       # pip install filterpy
 from filterpy.common import Q_discrete_white_noise
@@ -7,7 +8,6 @@ from enum import Enum
 from CoilNet import CoilNet
 from ImageSet import LabelType
 from ImageSet import ImageSet
-#from CoilOffset import CoilOffset
 from CoilTracer import CoilTracer
 from CoilImageProc import *
 
@@ -18,17 +18,20 @@ class WarningType(Enum):
     ellipse_large_error = 2
 
 
-class CenterTracer(CoilTracer):
+class CenterTracer(object):
     def __init__(self):
         self.WINDOW_SIZE = 512
         self.output_size = LabelType.InnerOnly
-        network = self.init_network(self.WINDOW_SIZE, self.output_size)
-        super().__init__(network, self.output_size)
+        self.coil_net = self.init_network(self.WINDOW_SIZE, self.output_size)
+        self.coil_net.init_model()
+
+        # 使用CNN确定中心位置时，在初始位置附近，随机产生一系列窗口，对窗口中的图像检测中心，然后求平均
+        self.net_x_range = (-20, 20)  # 随机窗口x方向范围
+        self.net_y_range = (-20, 20)  # 随机窗口y方向范围
+        self.net_count = 8  # 随机窗口数量
 
         # 通过帧差分检测偏移量时，需要确定检测窗口大小，和窗口相对初始中心点的偏移位置
         self.diff_size = 256           # 检测窗口尺寸，必须是2的指数
-        #self.diff_x_range = (-10, 10)
-        #self.diff_y_range = (-10, 10)
         self.diff_offset = (180, -180)
         self.lst_frame = None
 
@@ -56,7 +59,7 @@ class CenterTracer(CoilTracer):
         self.err_cnn_vs_fit = None         # cnn椭圆与拟合椭圆比值
 
         # 显示轨迹跟踪
-        self.show_fitting = True           # 显示椭圆拟合
+        self.show_fitting = False           # 显示椭圆拟合
         self.kalman_trace = list()          # 经过卡尔曼滤波后的轨迹
         self.vision_trace = list()          # 单纯由视觉产生的轨迹
 
@@ -100,11 +103,13 @@ class CenterTracer(CoilTracer):
             trace_stat[center] = values
         self.exp_ellipse = trace_stat
 
-    def init_one_cycle(self, init_ellipse):
-        # 初始化模板匹配
-        #sub_windows_cnt = (self.diff_x_range[1] - self.diff_x_range[0]) * (self.diff_y_range[1] - self.diff_y_range[0])
-        #self.coil_diff = CoilOffset(self.diff_size ** 2, sub_windows_cnt)
+    def load_model(self, model_file):
+        self.coil_net.load_model(model_file)
 
+    def pre_process_image(self, image):
+        return edge_image(image)
+
+    def init_one_cycle(self, init_ellipse):
         self.lst_frame = None
         self.ellipse_kalman = np.array(init_ellipse).astype(np.float32)
 
@@ -116,6 +121,59 @@ class CenterTracer(CoilTracer):
         self.err_cnn_vs_fit = -1
 
         self.kalman.x = np.array([init_ellipse[0], 0, init_ellipse[1], 0])
+
+    def center_by_net(self, frame, img_size, init_center):
+        # 预先提取图像边缘以提高精度
+        # 为了减小计算耗时，仅对目标附近的区域进行边缘提取
+        proc_image = get_sub_image(frame, center=init_center, img_size=img_size + 100)
+        proc_image = self.pre_process_image(proc_image)
+
+        # a set of images are clipped around the init center, each one is used to obtain one center location
+        sub_center = (int((img_size + 100) / 2), int((img_size + 100) / 2))
+        w_center = trans_windows_rand(sub_center, self.net_x_range, self.net_y_range, self.net_count)
+
+        sub_imgs = list()
+        for _, center in enumerate(w_center):
+            img = get_sub_image(proc_image, center, img_size)
+            if img is not None:
+                sub_imgs.append((norm_image(img), center))
+
+        rst_cnt = len(sub_imgs)
+        if rst_cnt == 0:
+            return None
+
+        # write images into a batch and predict the result
+        batch_img = torch.zeros(len(sub_imgs), int(img_size), int(img_size), dtype=torch.float32)
+        for i, img in enumerate(sub_imgs):
+            batch_img[i] = torch.from_numpy(img[0])
+        params = self.coil_net.predict(batch_img)
+
+        # average obtained results
+        values = np.zeros(LabelType.InnerOuter, np.int32)
+        for i, p in enumerate(params):
+            x, y = calc_original_pos(p, img_size, sub_imgs[i][1])
+            values[0] += x
+            values[1] += y
+
+            if self.output_size > LabelType.CenterOnly:
+                values[2] += p[2]
+                values[3] += p[3]
+                values[4] += p[4]
+
+            if self.output_size > LabelType.InnerOnly:
+                values[5] += p[5] - img_size / 2 + sub_imgs[i][1][0]
+                values[6] += p[6] - img_size / 2 + sub_imgs[i][1][1]
+                values[7] += p[7]
+                values[8] += p[8]
+                values[9] += p[9]
+        for i in range(10):
+            values[i] = int(values[i] / rst_cnt + 0.5)
+
+        # 计算目标在整个图像中的位置
+        values[0] += init_center[0] - sub_center[0]
+        values[1] += init_center[1] - sub_center[1]
+
+        return values
 
     def offset_by_template(self, frame, lst_center):
         if self.lst_frame is None:
@@ -145,43 +203,6 @@ class CenterTracer(CoilTracer):
         self.lst_frame = frame
 
         return off_x, off_y
-
-    """
-    def offset_by_frame_diff(self, frame, lst_center, cur_center):
-        if self.lst_frame is None:
-            self.lst_frame = frame
-            return 0, 0
-
-        # 从前一帧图像中截取差分检测窗口
-        lst_center = (lst_center[0] + self.diff_offset[0], lst_center[1] + self.diff_offset[1])
-        sub_img = get_sub_image(self.lst_frame, lst_center, self.diff_size)
-        if sub_img is None:
-            return 0, 0
-        sub_img = cv2.cvtColor(sub_img, cv2.COLOR_BGR2GRAY)
-        lst_img = sub_img.reshape(self.diff_size * self.diff_size)
-
-        # 从当前帧图像中截取一系列测试窗口，与前帧图像窗口做匹配，找出匹配度最高的窗口
-        cur_center = (cur_center[0] + self.diff_offset[0], cur_center[1] + self.diff_offset[1])
-        off_centers = trans_windows(cur_center, self.diff_x_range, self.diff_y_range, step=1)
-
-        cur_imgs = np.zeros([len(off_centers), lst_img.shape[0]], np.uint8)
-        for i, center in enumerate(off_centers):
-            sub_img = get_sub_image(frame, center, self.diff_size)
-            if sub_img is not None:
-                sub_img = cv2.cvtColor(sub_img, cv2.COLOR_BGR2GRAY)
-                cur_imgs[i] = sub_img.reshape(self.diff_size * self.diff_size).copy()
-
-        # 计算每张图像差分后的误差平方和，从中选择误差最小的，最为最优匹配
-        RMSEs = self.coil_diff.most_matching_frame(lst_img, cur_imgs)
-        min_idx = np.argmin(RMSEs)
-        off_x = off_centers[min_idx][0] - lst_center[0]
-        off_y = off_centers[min_idx][1] - lst_center[1]
-
-        # 保存当前帧用于下一次差分计算
-        self.lst_frame = frame
-
-        return off_x, off_y
-    """
 
     def ellipse_expected(self, center, neighbor=7):
         if self.exp_ellipse is None:
@@ -386,16 +407,19 @@ class CenterTracer(CoilTracer):
         return self.coil_ellipse
 
     def show_trace(self, frame):
+        if self.coil_ellipse is None:
+            return frame
+
         # show coil center obtained by vision and kalman filter
         if self.ellipse_vision is not None:
             cv2.circle(frame, (self.ellipse_vision[0], self.ellipse_vision[1]), 2, (255, 0, 0), 2)
         cv2.circle(frame, (self.coil_ellipse[0], self.coil_ellipse[1]), 2, (0, 255, 0), 2)
-
         self.draw_ellipse(frame, self.coil_ellipse, color=(0, 255, 0))
 
         # show center moving trace
-        lst_ellipse = self.kalman_trace[0]
-        for _, ellipse in enumerate(self.kalman_trace):
+        if len(self.kalman_trace) > 0:
+            lst_ellipse = self.kalman_trace[0]
+            for _, ellipse in enumerate(self.kalman_trace):
                 cv2.line(frame, lst_ellipse[0:2], ellipse[0:2], (0, 255, 0), 2)
                 lst_ellipse = ellipse
 
