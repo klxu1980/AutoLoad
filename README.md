@@ -11,3 +11,6 @@ AutoLoad.py中包含了类AutoLoader，是带卷自动跟踪程序的接口。�
 4. 带卷对准并插入开卷机后，判断带卷是否已经完全插入开卷机，调用函数is_coil_into_unpacker()。函数返回bool值，True表示已经完全插入开卷机，可以开卷。
 
 5. 带卷插入开卷机后，判断是否已经开卷，调用函数is_coil_unpacked()。函数返回bool值，True表示已经开卷。
+
+## 设置模型文件
+AutoLoader的构造函数中包含了带卷跟踪器coil_tracer，带卷初始位置检测器coil_locator，上卷检测器coil_pos_status，开卷检测器coil_open_status。每个实例均需要通过load_model()函数加载模型文件。如果使用了新模型，注意修改这里。
