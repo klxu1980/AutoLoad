@@ -14,3 +14,8 @@ AutoLoad.py中包含了类AutoLoader，是带卷自动跟踪程序的接口。�
 
 ## 设置模型文件
 AutoLoader的构造函数中包含了带卷跟踪器coil_tracer，带卷初始位置检测器coil_locator，上卷检测器coil_pos_status，开卷检测器coil_open_status。每个实例均需要通过load_model()函数加载模型文件。如果使用了新模型，注意修改这里。
+
+## 上料跟踪程序测试和示例
+AutoLoad.py中包含了视觉跟踪的测试和示例程序。
+
+## 模型训练
