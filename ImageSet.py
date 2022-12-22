@@ -80,7 +80,8 @@ class ImageSet:
     def pixel2label(self, pixel):
         return pixel * 2.0 / self.img_size - 1.0
 
-    def angle2label(self, angle):
+    @staticmethod
+    def angle2label(angle):
         angle = angle % 360
         if angle >= 180:
             angle -= 180
@@ -89,7 +90,8 @@ class ImageSet:
     def label2pixel(self, label):
         return int((label + 1.0) * self.img_size)
 
-    def label2angle(self, label):
+    @staticmethod
+    def label2angle(label):
         return int((label + 1.0) * 90.0)
 
     def random_sample(self, batch_size):
@@ -120,7 +122,8 @@ class ImageSet:
     def random_cut_away(self):
         pass
 
-    def add_random_line(self, image):
+    @staticmethod
+    def add_random_line(image):
         x1 = random.randint(0, image.shape[1])
         y1 = random.randint(0, image.shape[0])
         x2 = random.randint(0, image.shape[1])
@@ -134,7 +137,8 @@ class ImageSet:
         for i in range(cnt):
             self.add_random_line(image)
 
-    def add_random_arc(self, image):
+    @staticmethod
+    def add_random_arc(image):
         x = random.randint(0, image.shape[1])
         y = random.randint(0, image.shape[0])
         axis_l = random.randint(0, int(image.shape[1] / 3))
@@ -177,6 +181,7 @@ class ImageSet:
             cv2.imshow("", img)
             if cv2.waitKey(0) & 0xff == ord('q'):  # 按q退出
                 break
+
 
 if __name__ == '__main__':
     #img_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练集\\smallcoildata\\test", output_size=LabelType.InnerOnly, img_size=512)

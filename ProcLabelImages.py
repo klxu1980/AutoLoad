@@ -26,12 +26,13 @@ def remove_ellipse_noise(image, file_name):
     return image
 
 
-def convert_images(src_dir, dst_dir):
+def convert_images(src_dir, dst_dir, remove_noise=False):
     os.chdir(src_dir)
     for file_name in glob.glob("*.jpg"):
         img = cv2.imread(file_name)
         edge = edge_image(img)
-        edge = remove_ellipse_noise(edge, file_name)
+        if remove_noise:
+            edge = remove_ellipse_noise(edge, file_name)
         cv2.imwrite(dst_dir + "\\" + file_name, edge)
 
 

@@ -37,7 +37,6 @@ def generate_image_by_trans(src_img, label, img_size, random_range, count, dst_d
                 y_center - img_size[1] / 2 < 0 or y_center + img_size[1] / 2 > src_img.shape[0]:
             continue
 
-
         # avoid offset out of src image bound
         '''
         if x_center - img_size[0] / 2 < 0:
@@ -67,10 +66,7 @@ def generate_image_by_trans(src_img, label, img_size, random_range, count, dst_d
 
 
 def generate_train_samples(src_dir, dst_dir, inner_ellipse):
-    if inner_ellipse:
-        img_size = (512, 512)
-    else:
-        img_size = (1400, 1400)
+    img_size = (512, 512) if inner_ellipse else (1400, 1400)
 
     os.chdir(src_dir + "/")
     for file_name in glob.glob("*.jpg"):
@@ -105,7 +101,10 @@ def test_image_labels(dir):
         if cv2.waitKey(0) == ord('q'):
             break
 
-#generate_train_samples("D:/01 自动上卷/标注图片", "D:/TrainOuter", inner_ellipse=True)
+
+if __name__ == '__main__':
+    #generate_train_samples("D:/01 自动上卷/标注图片", "D:/TrainOuter", inner_ellipse=True)
+    test_image_labels("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Train_raw")
 '''
 def main():
     print("Generate labeled training images(Y) or check labeled images(N)?")

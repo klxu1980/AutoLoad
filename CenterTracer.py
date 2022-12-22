@@ -8,7 +8,6 @@ from enum import Enum
 from CoilNet import CoilNet
 from ImageSet import LabelType
 from ImageSet import ImageSet
-from CoilTracer import CoilTracer
 from CoilImageProc import *
 
 
@@ -63,7 +62,8 @@ class CenterTracer(object):
         self.kalman_trace = list()          # 经过卡尔曼滤波后的轨迹
         self.vision_trace = list()          # 单纯由视觉产生的轨迹
 
-    def init_network(self, image_size, output_size):
+    @staticmethod
+    def init_network(image_size, output_size):
         network = CoilNet(img_size=image_size, output_size=output_size)
         network.add_conv_layer(channels=8, kernel_size=3, padding=1, pool_size=2)
         network.add_conv_layer(channels=16, kernel_size=3, padding=1, pool_size=2)
@@ -106,7 +106,8 @@ class CenterTracer(object):
     def load_model(self, model_file):
         self.coil_net.load_model(model_file)
 
-    def pre_process_image(self, image):
+    @staticmethod
+    def pre_process_image(image):
         return edge_image(image)
 
     def init_one_cycle(self, init_ellipse):
@@ -389,7 +390,6 @@ class CenterTracer(object):
         ellipse_vision = self.calc_coil_inner_ellipse(frame, init_ellipse=self.ellipse_kalman)
 
         # locate coil offset by frame difference
-        #ox, oy = self.offset_by_frame_diff(frame, lst_center=self.ellipse_kalman, cur_center=ellipse_vision)
         ox, oy = self.offset_by_template(frame, lst_center=self.ellipse_kalman)
 
         # kalman filter
