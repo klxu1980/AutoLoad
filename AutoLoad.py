@@ -318,8 +318,7 @@ class AutoLoader(object):
             frame = self.show_loading_info(frame)
 
             # 显示当前帧
-            self.show_text(frame, "frame count = %d, current frame = %d" % (video.frame_cnt, video.cur_frame),
-                           (20, 140))
+            self.show_text(frame, "frame count = %d, current frame = %d" % (video.frame_cnt, video.cur_frame), (20, 140))
 
             # 显示操作按键
             self.show_key_operations(frame, row_begin=200)
@@ -331,16 +330,20 @@ class AutoLoader(object):
             # 保存视频
             self.save_video(frame_resized)
 
+            if self.loading_stage == LoadStage.MOVING_TO_UNPACKER and self.save_trace and \
+                    self.coil_tracer.coil_ellipse[0] < 1800:
+                self.save_ellipse(self.coil_tracer.coil_ellipse)
+
             # key operation
             key = cv2.waitKeyEx(0 if self.paused else 10)
             if key == ord('p') or key == ord('P'):
                 self.paused = not self.paused
             elif key == 2555904:
                 if self.paused:
-                    self.video.forward()
+                    video.forward()
             elif key == 2424832:
                 if self.paused:
-                    self.video.backward()
+                    video.backward()
             elif key == ord('S') or key == ord('s'):
                 self.saving_video = True
             elif key == ord('E') or key == ord('e'):
@@ -403,10 +406,14 @@ if __name__ == '__main__':
         for file_name in glob.glob("*.avi"):
             auto_loader.test_demo(file_name)
     else:
+        # 再给定目录下枚举所有的带卷视频，记录带卷轨迹
         auto_loader.save_trace = True
-        for root, dirs, files in os.walk("G:\\01 自动上卷视频"):
+        auto_loader.coil_tracer.exp_ellipse = None
+        for root, dirs, files in os.walk("E:\\20220521-20220621数据"):
             for _, file in enumerate(files):
-                if os.path.splitext(file)[-1] == ".avi":
-                    file_path = root + "\\" + file
-                    auto_loader.test_demo(file_path)
-
+                if os.path.splitext(file)[-1] == ".avi" and "orginal" in os.path.splitext(file)[0]:
+                    # 目前保存的视频中，文件名中包含"orginal"的是原始视频
+                    # 部分原始视频之前已经分析保存过带卷路径，这些视频将被跳过，不再重复分析
+                    if file + ".csv" in files:
+                        continue
+                    auto_loader.test_demo(video_file_name=root + "\\" + file)

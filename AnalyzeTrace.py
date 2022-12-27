@@ -5,6 +5,44 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+def read_trace_csv_raw(file_name, raw_list):
+    """
+    从一个带卷轨迹csv文件中，读取带卷轨迹原始信息(x, y, long, short, angle)，存储到raw_list中
+    :param file_name:
+    :param raw_list:
+    :return:
+    """
+    csv_reader = csv.reader(open(file_name, 'r'))
+    for line in csv_reader:
+        ellipse = np.array((int(line[0]), int(line[1]), int(line[2]), int(line[3]), int(line[4])))
+        raw_list.append(ellipse)
+
+
+def save_all_csv(dir, dst_file):
+    """
+    AutoLoad可以对每一个视频文件进行处理，将带卷轨迹和内椭圆信息存储在一个csv文件中
+    save_all_csv()进一步将所有这些csv文件中的带卷信息存储到一个csv文件中，以便于分析处理带卷轨迹
+    :param dir:
+    :param dst_file:
+    :return:
+    """
+    csv_writer = csv.writer(open(dst_file, 'w', newline=''))
+
+    file_cnt = 0
+    for root, dirs, files in os.walk(dir):
+        for _, file in enumerate(files):
+            if os.path.splitext(file)[-1] == ".csv" and ".avi" in os.path.splitext(file)[0]:
+                raw_list = list()
+                file_name = root + "\\" + file
+                read_trace_csv_raw(file_name, raw_list)
+
+                file_cnt += 1
+                csv_writer.writerow((str(file_cnt), file_name))
+                for _, row in enumerate(raw_list):
+                    line = (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+                    csv_writer.writerow(line)
+
+
 def calc_trace_avg_std(raw_list):
     """
     计算轨迹中椭圆参数的平均值和标准差
@@ -187,6 +225,9 @@ def show_trace_stat(file_name):
 
 
 if __name__ == '__main__':
+    # 如果需要把所有轨迹文件转存到一个csv文件中，则使用该代码
+    #save_all_csv("E:\\20220521-20220621数据\\视频数据", "e:\\历史数据.csv")
+
     traces = read_all_traces_from_one_csv("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\历史数据.csv")
 
     max_std = np.array((5.0, 5.0, 5.0))
