@@ -277,7 +277,7 @@ class AutoLoader(object):
         if self.loading_stage == LoadStage.WAITING_4_LOADING:
             # 在图像上显示带卷中心位置
             init_center = self.coil_locator.center.astype(np.int32)
-            cv2.circle(frame, center=init_center, radius=5, color=(0, 0, 255), thickness=2)
+            cv2.circle(frame, center=(init_center[0], init_center[1]), radius=5, color=(0, 0, 255), thickness=2)
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             self.draw_aiming_lines(frame)
             self.coil_tracer.show_trace(frame)
@@ -382,7 +382,8 @@ if __name__ == '__main__':
     print("7: Test all videos")
     mode = input("")
     if mode == "1":
-        os.chdir("G:\\01 自动上卷视频\\内椭圆参数统计视频")
+        #os.chdir("G:\\01 自动上卷视频\\内椭圆参数统计视频")
+        os.chdir("DemoVideo")
     elif mode == "2":
         os.chdir("G:\\01 自动上卷视频\\bad cases")
     elif mode == "3":

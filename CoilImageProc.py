@@ -140,7 +140,15 @@ def calc_original_pos(pos, img_size, init_center):
 
 
 if __name__ == '__main__':
+    """
     mask = np.zeros((512, 512), dtype=np.uint8)
     cv2.ellipse(mask, (256, 256), (150, 100), 30, 150, 400, 255, 3)
     cv2.imshow("", mask)
+    cv2.waitKey(0)
+    """
+    img = cv2.imread("e:\\xxx.jpg")
+    cv2.imshow("xx", img)
+    #img = gray_image(img)
+    img = edge_image(img)
+    cv2.imshow("", img)
     cv2.waitKey(0)

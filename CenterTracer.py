@@ -420,7 +420,9 @@ class CenterTracer(object):
         if len(self.kalman_trace) > 0:
             lst_ellipse = self.kalman_trace[0]
             for _, ellipse in enumerate(self.kalman_trace):
-                cv2.line(frame, lst_ellipse[0:2], ellipse[0:2], (0, 255, 0), 2)
+                p1 = (lst_ellipse[0], lst_ellipse[1])
+                p2 = (ellipse[0], ellipse[1])
+                cv2.line(frame, p1, p2, (0, 255, 0), 2)
                 lst_ellipse = ellipse
 
         # 显示差分计算区域
