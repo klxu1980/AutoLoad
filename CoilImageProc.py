@@ -3,12 +3,11 @@ import numpy as np
 import random
 import math
 from ellipse import LsqEllipse     # pip install lsq-ellipse
+from FilePath import PYTHON_PATH
 
 
-# model.yml.gz文件就在项目文件夹下，在python环境下使用相对路径就可以了
-# 但是，当VC调用时，需要使用绝对路径
-edge_detector = cv2.ximgproc.createStructuredEdgeDetection("model.yml.gz")
-# edge_detector = cv2.ximgproc.createStructuredEdgeDetection("d:/autoload/python/model.yml.gz")
+# model.yml.gz文件就在项目文件夹下，在python环境下使用相对路径就可以了。当VC调用时，需要使用绝对路径
+edge_detector = cv2.ximgproc.createStructuredEdgeDetection(PYTHON_PATH + "model.yml.gz")
 
 
 def cv_read(file_name, gray=False):

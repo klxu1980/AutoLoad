@@ -7,12 +7,12 @@ import csv
 import numpy as np
 from enum import Enum
 
-
 from CenterTracer import CenterTracer
 from CoilLocate import CoilLocator
 from CoilStatus import CoilOpenStatus
 from CoilStatus import CoilPosStatus
 from CoilStatus import CoilExist
+from FilePath import PYTHON_PATH
 
 INIT_COIL_CENTER = (1800, 630)   # 带卷在堆料区的初始位置。通常会首先进行带卷的初始位置定位，如果没有执行，则默认使用该位置。
 AIMING_BEGIN = (1450, 1450)      # 带卷对准开卷机的检测开始和停止位置
@@ -20,9 +20,6 @@ AIMING_END = 1250
 
 SCREEN_WIDTH = 1400
 SHOW_EDGE_IN_TEST = False
-
-# PYTHON_PATH = "D:\\autoload\\Python\\"     # VC环境中调用时，需要使用绝对路径
-PYTHON_PATH = ""
 
 
 class VideoPlayer(object):
