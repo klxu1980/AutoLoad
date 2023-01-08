@@ -70,6 +70,20 @@ class CoilPosStatus(CoilStatusNet):
         self.save_prefix = "上卷检测"
 
 
+class CoilExist(CoilStatusNet):
+    def __init__(self, src_size, src_position):
+        super(CoilExist, self).__init__(status_cnt=2, src_size=src_size, src_position=src_position, dst_size=128)
+
+        self.add_conv_layer(channels=8, kernel_size=5, padding=2, pool_size=2)
+        self.add_conv_layer(channels=16, kernel_size=5, padding=2, pool_size=2)
+        self.add_conv_layer(channels=32, kernel_size=5, padding=2, pool_size=2)
+        self.add_linear_layer_by_divider(divider=2)
+        self.add_linear_layer_by_divider(divider=4)
+        self.add_linear_layer(output_size=2)
+
+        self.save_prefix = "带卷存在"
+
+
 def main():
     mode = input('Network for coil open(O) or position(P) detection?')
     if mode == 'o' or mode == 'O':

@@ -6,19 +6,23 @@ import datetime
 import csv
 import numpy as np
 from enum import Enum
+
+
 from CenterTracer import CenterTracer
-from TopTracer import TopTracer
 from CoilLocate import CoilLocator
-from ImageSet import LabelType
 from CoilStatus import CoilOpenStatus
 from CoilStatus import CoilPosStatus
+from CoilStatus import CoilExist
 
-
+INIT_COIL_CENTER = (1800, 630)   # 带卷在堆料区的初始位置。通常会首先进行带卷的初始位置定位，如果没有执行，则默认使用该位置。
 AIMING_BEGIN = (1450, 1450)      # 带卷对准开卷机的检测开始和停止位置
 AIMING_END = 1250
 
 SCREEN_WIDTH = 1400
 SHOW_EDGE_IN_TEST = False
+
+# PYTHON_PATH = "D:\\autoload\\Python\\"     # VC环境中调用时，需要使用绝对路径
+PYTHON_PATH = ""
 
 
 class VideoPlayer(object):
@@ -59,21 +63,26 @@ class AutoLoader(object):
     def __init__(self):
         # self.coil_tracer是核心跟踪器
         self.coil_tracer = CenterTracer()
-        self.coil_tracer.load_model("带卷定位_有干扰_2022-08-05-16-05.pt")
+        self.coil_tracer.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
 
         # 带卷初始位置检测器
         self.coil_locator = CoilLocator()
-        self.coil_locator.load_model("带卷初始位置2022-08-18-22-55.pt")
+        self.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2022-08-18-22-55.pt")
 
         # 上卷检测器
         self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
         self.coil_pos_status.init_model()
-        self.coil_pos_status.load_model("上卷检测2020-10-24-16-30.pt")
+        self.coil_pos_status.load_model(PYTHON_PATH + "上卷检测2020-10-24-16-30.pt")
 
         # 开卷检测器
         self.coil_open_status = CoilOpenStatus(src_size=1200, src_position=(0, 800))
         self.coil_open_status.init_model()
-        self.coil_open_status.load_model("开卷检测2020-10-24-12-12.pt")
+        self.coil_open_status.load_model(PYTHON_PATH + "开卷检测2020-10-24-12-12.pt")
+
+        # 鞍座检测器，判断带卷是否在鞍座上
+        self.coil_exist_status = CoilExist(src_size=1000, src_position=(1550, 0))
+        self.coil_exist_status.init_model()
+        self.coil_exist_status.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
 
         # 以下变量主要在demo中使用到
         self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
@@ -106,19 +115,19 @@ class AutoLoader(object):
         cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
     def load_aiming_lines(self):
-        csv_reader = csv.reader(open("trace_stat_正常.csv", 'r'))
+        csv_reader = csv.reader(open(PYTHON_PATH + "trace_stat_正常.csv", 'r'))
         for i, line in enumerate(csv_reader):
             if i == 0:
                 self.aiming_ok_line = (float(line[0]), float(line[1]))
                 break
 
-        csv_reader = csv.reader(open("trace_stat_偏高.csv", 'r'))
+        csv_reader = csv.reader(open(PYTHON_PATH + "trace_stat_偏高.csv", 'r'))
         for i, line in enumerate(csv_reader):
             if i == 1:
                 self.aiming_high_line = (float(line[0]), float(line[1]))
                 break
 
-        csv_reader = csv.reader(open("trace_stat_偏低.csv", 'r'))
+        csv_reader = csv.reader(open(PYTHON_PATH + "trace_stat_偏低.csv", 'r'))
         for i, line in enumerate(csv_reader):
             if i == 2:
                 self.aiming_low_line = (float(line[0]), float(line[1]))
@@ -165,12 +174,6 @@ class AutoLoader(object):
     def draw_aiming_lines(self, image):
         x_begin = 1200
         x_end = 1500
-        """
-        cv2.line(image,
-                 (x_begin, int(x_begin * self.aiming_ok[0] + self.aiming_ok[1])),
-                 (x_end, int(x_end * self.aiming_ok[0] + self.aiming_ok[1])),
-                 color=(0, 255, 255), thickness=2)
-        """
         cv2.line(image,
                  (x_begin, int(x_begin * self.aiming_high_line[0] + self.aiming_high_line[1])),
                  (x_end, int(x_end * self.aiming_high_line[0] + self.aiming_high_line[1])),
@@ -195,7 +198,9 @@ class AutoLoader(object):
         准备开始新带卷的自动上卷控制。只需要上卷时调用一次，也可多次调用，对上卷无影响。
         :return: 无
         """
+        init_ellipse = (INIT_COIL_CENTER[0], INIT_COIL_CENTER[1], 0, 0, 0)
         self.coil_locator.init_one_cycle()
+        self.coil_tracer.init_one_cycle(init_ellipse=init_ellipse)
         self.loading_stage = LoadStage.WAITING_4_LOADING
 
     def wait_for_loading(self, frame):
@@ -224,7 +229,6 @@ class AutoLoader(object):
         :param frame: 由摄像头获得的带卷RGB图像
         :return: True: 已插入开卷机；False: 未插入开卷机
         """
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         status = self.coil_pos_status.analyze_one_frame(frame)
         return status
 
@@ -234,7 +238,6 @@ class AutoLoader(object):
         :param frame: 由摄像头获得的带卷RGB图像
         :return: True: 已开卷；False: 未开卷
         """
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         status = self.coil_open_status.analyze_one_frame(frame)
         return status
 
@@ -312,7 +315,7 @@ class AutoLoader(object):
         while video is not None and not video.is_end():
             # 从摄像头或文件中读取帧，调整尺寸并灰度化
             frame = video.get_frame()
-            frame_4_proc = frame.copy()
+            frame_4_proc = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             self.control_demo(frame=frame_4_proc)
             frame = self.show_loading_info(frame)
@@ -360,6 +363,65 @@ class AutoLoader(object):
             if not self.paused:
                 video.forward()
 
+    def change_mode(self, mode):
+        """
+        与张方远的程序兼容
+        :param mode:
+        :return:
+        """
+        self.loading_stage = mode
+
+    def run_one_img(self, frame):
+        """
+        与张方远的程序兼容
+        :param frame:
+        :return:
+        """
+        # 椭圆检测功能
+        if self.loading_stage == 0 or self.loading_stage == 4:
+            # 张方远程序中，带卷的跟踪分为了从堆料区到基坑底部，和向开卷机运动两部分(分别是阶段0和4)。算法改进后不再需要分成两部分，
+            # 张方远程序中，包含了对内圆和外圆的检测。外圆检测没有实际用处，因此用内圆数据填充占位。
+            ellipse = self.uploading(frame=frame)
+            data = [ellipse[0], ellipse[1], ellipse[2], ellipse[3], ellipse[4],
+                    ellipse[0], ellipse[1], ellipse[2], ellipse[3], ellipse[4]]
+            return data
+        # 上卷检测模式
+        elif self.loading_stage == 1:
+            status = self.coil_pos_status.analyze_one_frame(frame)
+            return status
+        # 开卷检测模式
+        elif self.loading_stage == 2:
+            status = self.coil_open_status.analyze_one_frame(frame)
+            return status
+        # 鞍座检测模式
+        elif self.loading_stage == 3:
+            status = self.coil_exist_status.analyze_one_frame(frame)
+            return status
+
+
+class combine(object):
+    """
+    combine类是张方远的程序中设计的，用于被VC程序调用。
+    对他的原始程序进行修改，保留接口形式。
+    """
+    def __init__(self):
+        self.load = AutoLoader()
+        self.load.init_one_cycle()
+
+    def reset(self):
+        self.load.init_one_cycle()
+
+    def receive(self, image, mode):
+        """
+        接收图片并调用
+        :param image:
+        :param mode:
+        :return:
+        """
+        self.load.change_mode(mode)
+        pp = self.load.run_one_img(image)
+        return pp
+
 
 def file_name(file_dir):
     for root, dirs, files in os.walk(file_dir):
@@ -368,7 +430,7 @@ def file_name(file_dir):
         print(files)
 
 
-if __name__ == '__main__':
+def demo_test():
     auto_loader = AutoLoader()
     auto_loader.coil_tracer.read_trace_stat("trace_stat.csv")
     init_pos = None
@@ -382,7 +444,7 @@ if __name__ == '__main__':
     print("7: Test all videos")
     mode = input("")
     if mode == "1":
-        #os.chdir("G:\\01 自动上卷视频\\内椭圆参数统计视频")
+        # os.chdir("G:\\01 自动上卷视频\\内椭圆参数统计视频")
         os.chdir("DemoVideo")
     elif mode == "2":
         os.chdir("G:\\01 自动上卷视频\\bad cases")
@@ -418,3 +480,11 @@ if __name__ == '__main__':
                     if file + ".csv" in files:
                         continue
                     auto_loader.test_demo(video_file_name=root + "\\" + file)
+
+
+def VC_test():
+    cob = combine()
+
+
+if __name__ == '__main__':
+    demo_test()

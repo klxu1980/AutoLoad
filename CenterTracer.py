@@ -1,7 +1,5 @@
-import cv2
 import torch
-import numpy as np
-from filterpy.kalman import KalmanFilter       # pip install filterpy
+from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
 import csv
 from enum import Enum
@@ -9,6 +7,12 @@ from CoilNet import CoilNet
 from ImageSet import LabelType
 from ImageSet import ImageSet
 from CoilImageProc import *
+
+"""
+filterpy需要单独安装，执行指令"pip install filterpy"
+VC调用filterpy时，有可能会出现"DLL load failed while importing _arpack"错误。该错误通常是scipy的版本兼容性问题引起的。
+可以先删除，再安装scipy。具体方法为：在anaconda prompt下面，执行pip uninstall scipy，再执行pip install scipy。
+"""
 
 
 class WarningType(Enum):
@@ -20,6 +24,7 @@ class WarningType(Enum):
 class CenterTracer(object):
     def __init__(self):
         self.WINDOW_SIZE = 512
+
         self.output_size = LabelType.InnerOnly
         self.coil_net = self.init_network(self.WINDOW_SIZE, self.output_size)
         self.coil_net.init_model()
@@ -186,11 +191,9 @@ class CenterTracer(object):
         template = get_sub_image(self.lst_frame, lst_center, self.diff_size)
         if template is None:
             return 0, 0
-        template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
         # 当前检测窗口
         target = get_sub_image(frame, lst_center, self.diff_size * 2)
-        target = cv2.cvtColor(target, cv2.COLOR_BGR2GRAY)
 
         # 模板匹配
         result = cv2.matchTemplate(target, template, cv2.TM_SQDIFF_NORMED)

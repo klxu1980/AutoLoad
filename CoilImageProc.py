@@ -4,7 +4,11 @@ import random
 import math
 from ellipse import LsqEllipse     # pip install lsq-ellipse
 
+
+# model.yml.gz文件就在项目文件夹下，在python环境下使用相对路径就可以了
+# 但是，当VC调用时，需要使用绝对路径
 edge_detector = cv2.ximgproc.createStructuredEdgeDetection("model.yml.gz")
+# edge_detector = cv2.ximgproc.createStructuredEdgeDetection("d:/autoload/python/model.yml.gz")
 
 
 def cv_read(file_name, gray=False):
@@ -27,7 +31,12 @@ def color_image(image):
 
 
 def edge_image(image):
+    # For some unknown reason a grayed image will cause error in detectEdges(),
+    # so a grayed image need be transformed to a colored image.
+    if len(image.shape) == 2:
+        image = color_image(image)
     image = np.float32(image) * (1.0 / 255.0)
+    #edge_detector = cv2.ximgproc.createStructuredEdgeDetection("model.yml.gz")
     edge = edge_detector.detectEdges(image)
     max_value = np.max(edge)
     return (edge * 255 / max_value).astype(np.uint8)
