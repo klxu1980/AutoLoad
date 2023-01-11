@@ -1,5 +1,6 @@
 import socket
 import time
+import numpy as np
 
 PLC_IP = "8.8.8.140"
 PLC_PORT = 102
@@ -7,7 +8,7 @@ PLC_PORT = 102
 
 class PLCComm(object):
     def __init__(self):
-        self.buf_write = [0x03, 0x00,    # 帧头
+        buf_write = [0x03, 0x00,    # 帧头
                           0x00, 0x5F,    # 数组总长度（95 bytes）
                           0x02, 0xF0, 0x80, 0x32, 0x01, 0x00, 0x00, 0x00, 0x26, 0x00, 0x0E,
                           0x00, 0x40,    # 数据字节的总长度 + 4(即60 + 4 = 64)
@@ -53,8 +54,9 @@ class PLCComm(object):
                           0x00, 0x00, # data[83], data[84]  byte86
                           0x00, 0x00, # data[85], data[86]  byte88
                           ]
+        self.buf_write = np.array(buf_write, dtype=np.uint8)
 
-        self.read_data_key = [0x03, 0x00,
+        read_data_key = [0x03, 0x00,
                             0x00, 0x1F,
                             0x02, 0xF0, 0x80, 0x32, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x0E,
                             0x00, 0x00,
@@ -64,9 +66,11 @@ class PLCComm(object):
                             0x84, 0x00,
                             0x00, 0x00, # 起始位
                             ]
+        self.read_data_key = np.array(read_data_key, dtype=np.uint8)
 
-        self.buf_read = [0x00] # 用于接收数据缓冲区
+        self.buf_read = np.zeros(100, dtype=np.uint8)   # 用于接收数据缓冲区
 
+        # 从PLC中读取到的状态
         self.heartbeat    = 0  # 心跳信号
         self.car_up       = 0  # 开卷机小车上升信号
         self.car_down     = 0  # 开卷机小车下降信号
@@ -74,8 +78,8 @@ class PLCComm(object):
         self.car_backward = 0  # 开卷机小车后退信号
         self.support_open = 0  # 开卷机小车支撑信号
 
-    def send_tcp(self, data):
-        return False
+        # TCP
+        self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def read_tcp(self):
         pass
@@ -84,24 +88,27 @@ class PLCComm(object):
         # 连接秘钥1
         datatest1 = [0x03, 0x00, 0x00, 0x16, 0x11, 0xE0, 0x00, 0x00, 0x00, 0x01, 0x00, 0xC1,
                      0x02, 0x01, 0x00, 0xC2, 0x02, 0x01, 0x03, 0xC0, 0x01, 0x0A]
+        datatest1 = np.array(datatest1, dtype=np.uint8)
+
         # 连接秘钥2
         datatest2 = [0x03, 0x00, 0x00, 0x19, 0x02, 0xF0, 0x80, 0x32, 0x01, 0x00, 0x00, 0x01,
                      0x00, 0x00, 0x08, 0x00, 0x00, 0xF0, 0x00, 0x00, 0x01, 0x00, 0x01, 0x03, 0xC0]
+        datatest2 = np.array(datatest2, dtype=np.uint8)
 
         # 创建用于通信的socket
         print("正在连接PLC...")
-        self.sHost = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sHost.connect((PLC_IP, PLC_PORT))
+        self.tcp.connect((PLC_IP, PLC_PORT))
+        self.tcp.settimeout(0.5)
         print("连接到PLC端口")
 
         time.sleep(secs=0.05)
-        ret = self.send_tcp(datatest1)
+        ret = self.tcp.send(datatest1)
         if not ret:
             print("秘钥1发送失败")
             return False
 
         time.sleep(secs=0.05)
-        ret = self.send_tcp(datatest2)
+        ret = self.tcp.send(datatest2)
         if not ret:
             print("秘钥2发送失败")
             return False
@@ -110,7 +117,7 @@ class PLCComm(object):
         return True
 
     def send_read_command(self):
-        if not self.send_tcp(self.read_data_key):
+        if not self.tcp.send(self.read_data_key):
             print("读数据命令发送失败")
             return False
         else:
@@ -133,8 +140,8 @@ class PLCComm(object):
         return (self.buf_read[25 + id] >> bit) & 0x01
 
     def write_short(self, id, value):
-        self.buf_write[35 + id] = char(value >> 8)
-        self.buf_write[36 + id] = char(value)
+        self.buf_write[35 + id] = value >> 8
+        self.buf_write[36 + id] = value
 
     def write_float(self, id, value):
         pass

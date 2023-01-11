@@ -1,0 +1,13 @@
+encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+        result, img_encode = cv2.imencode('.jpg', img, encode_param)
+        img_data = np.array(img_encode).flatten()
+        img_size = len(img_data)
+
+        # pack stream data
+        stream_head = np.array((img_size >> 24, img_size >> 16, img_size >> 8, img_size), dtype=np.uint8)
+        stream_data = np.hstack((stream_head, img_data))
+
+        try:
+            self.tcp.settimeout(1.0)
+            self.tcp.send(stream_data)
+            self.error = False
