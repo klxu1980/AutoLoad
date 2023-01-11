@@ -12,6 +12,7 @@ from CoilLocate import CoilLocator
 from CoilStatus import CoilOpenStatus
 from CoilStatus import CoilPosStatus
 from CoilStatus import CoilExist
+from PLCComm import PLCComm
 from FilePath import PYTHON_PATH
 
 INIT_COIL_CENTER = (1800, 630)   # 带卷在堆料区的初始位置。通常会首先进行带卷的初始位置定位，如果没有执行，则默认使用该位置。
@@ -80,6 +81,9 @@ class AutoLoader(object):
         self.coil_exist_status = CoilExist(src_size=1000, src_position=(1550, 0))
         self.coil_exist_status.init_model()
         self.coil_exist_status.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
+
+        # 与PLC的TCP通信
+        self.plc = PLCComm()
 
         # 以下变量主要在demo中使用到
         self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
@@ -252,6 +256,9 @@ class AutoLoader(object):
         self.saving_video = False
         self.paused = False
         return video
+
+    def control(self, frame):
+        pass
 
     def control_demo(self, frame):
         start_time = time.perf_counter()
