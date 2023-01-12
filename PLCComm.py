@@ -68,7 +68,7 @@ class PLCComm(object):
                             ]
         self.read_data_key = np.array(read_data_key, dtype=np.uint8)
 
-        self.buf_read = np.zeros(100, dtype=np.uint8)   # 用于接收数据缓冲区
+        self.buf_read = None
 
         # 从PLC中读取到的状态
         self.heartbeat    = 0  # 心跳信号
@@ -81,8 +81,34 @@ class PLCComm(object):
         # TCP
         self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    def read_tcp(self):
-        pass
+    def send_tcp(self, order):
+        try:
+            byte_cnt = self.tcp.send(order)
+            if byte_cnt != len(order):
+                print("向PLC发送数据量不足")
+                return False
+        except socket.timeout:
+            print("向PLC发送数据超时")
+            return False
+        except socket.error:
+            print("向PLC发送数据出现错误")
+            return False
+        return True
+
+    def read_tcp(self, bytes_cnt):
+        try:
+            rcved = self.tcp.recv(bytes_cnt)
+            if len(rcved) < bytes_cnt:
+                print("接收PLC数据量不足，要求%d字节，收到%d字节" % (bytes_cnt, len(rcved)))
+                return None
+            else:
+                return rcved
+        except socket.timeout:
+            print("接收PLC数据超时")
+            return None
+        except socket.error:
+            print("接收PLC数据错误")
+            return None
 
     def connect(self):
         # 连接秘钥1
@@ -97,35 +123,47 @@ class PLCComm(object):
 
         # 创建用于通信的socket
         print("正在连接PLC...")
-        self.tcp.connect((PLC_IP, PLC_PORT))
+        try:
+            self.tcp.connect((PLC_IP, PLC_PORT))
+        except socket.timeout:
+            print("连接PLC端口超时")
+            return False
+        except socket.error:
+            print("连接PLC端口错误")
+            return False
         self.tcp.settimeout(0.5)
         print("连接到PLC端口")
 
-        time.sleep(secs=0.05)
-        ret = self.tcp.send(datatest1)
-        if not ret:
-            print("秘钥1发送失败")
+        # 向PLC发送密钥1
+        time.sleep(0.05)
+        if not self.send_tcp(datatest1):
+            print("发送密钥1失败")
             return False
 
-        time.sleep(secs=0.05)
-        ret = self.tcp.send(datatest2)
-        if not ret:
-            print("秘钥2发送失败")
+        # 向PLC发送密钥2
+        time.sleep(0.05)
+        if not self.send_tcp(datatest2):
+            print("发送密钥2失败")
             return False
 
         print("连接PLC成功")
         return True
 
     def send_read_command(self):
-        if not self.tcp.send(self.read_data_key):
-            print("读数据命令发送失败")
+        if not self.send_tcp(self.read_data_key):
+            print("读PLC数据命令发送失败")
             return False
         else:
             return True
 
     def receive_from_PLC(self):
-        self.receive_from_PLC()
-        return True
+        rcved = self.read_tcp(bytes_cnt=55)
+        if rcved is None:
+            print("接收PLC数据失败")
+            return False
+        else:
+            self.buf_read = rcved
+            return True
 
     def read_uchar(self, id):
         return self.buf_read[25 + id]
@@ -137,7 +175,7 @@ class PLCComm(object):
         pass
 
     def read_bool(self, id, bit):
-        return (self.buf_read[25 + id] >> bit) & 0x01
+        return int((self.buf_read[25 + id] >> bit) & 0x01)
 
     def write_short(self, id, value):
         self.buf_write[35 + id] = value >> 8
@@ -153,7 +191,7 @@ class PLCComm(object):
         else:
             self.buf_write[35 + id] &= ~mask
 
-    def read_status(self):
+    def refresh_status(self):
         if self.send_read_command() and self.receive_from_PLC():
             self.heartbeat    = self.read_short(0)
             self.car_up       = self.read_bool(29, 0)       # 开卷机小车上升信号
@@ -164,10 +202,11 @@ class PLCComm(object):
 
 
 if __name__ == '__main__':
+    time.sleep(0.5)
     plc = PLCComm()
     if plc.connect():
-       while True:
-           time.sleep(0.5)
-           plc.read_status()
-           print("小车上升： %d, 小车下降： %d, 小车前进： %d, 小车后退： %d, 开卷机支撑： %d" %
-                 (plc.car_up, plc.car_down, plc.car_forward, plc.car_backward))
+        time.sleep(3)
+        while True:
+            time.sleep(0.5)
+            plc.refresh_status()
+            print((plc.car_up, plc.car_down, plc.car_forward, plc.car_backward))

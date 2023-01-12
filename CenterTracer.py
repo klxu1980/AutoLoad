@@ -2,6 +2,7 @@ import torch
 from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
 import csv
+import time
 from enum import Enum
 from CoilNet import CoilNet
 from ImageSet import LabelType
@@ -42,6 +43,10 @@ class CenterTracer(object):
         # 初始化卡尔曼滤波器
         self.init_kalman()
 
+        # 计时器
+        self.start_time = time.perf_counter()
+        self.proc_interval = 0.0
+
         # 对椭圆进行低通滤波
         self.noise_filter_begin = 1800     # 开始滤波范围，当带卷中心x坐标小于该值时，开始滤波
         self.exp_ellipse = None            # 当前位置预期的椭圆参数字典
@@ -63,7 +68,7 @@ class CenterTracer(object):
         self.err_cnn_vs_fit = None         # cnn椭圆与拟合椭圆比值
 
         # 显示轨迹跟踪
-        self.show_fitting = False           # 显示椭圆拟合
+        self.show_fitting = True           # 显示椭圆拟合
         self.kalman_trace = list()          # 经过卡尔曼滤波后的轨迹
         self.vision_trace = list()          # 单纯由视觉产生的轨迹
 
@@ -118,6 +123,7 @@ class CenterTracer(object):
     def init_one_cycle(self, init_ellipse):
         self.lst_frame = None
         self.ellipse_kalman = np.array(init_ellipse).astype(np.float32)
+        self.start_time = time.perf_counter()
 
         self.kalman_trace.clear()
         self.vision_trace.clear()
@@ -383,6 +389,10 @@ class CenterTracer(object):
         return self.ellipse_vision
 
     def kalman_filter(self, center, offset):
+        # 采样时间间隔
+        self.proc_interval = time.perf_counter() - self.start_time
+        self.start_time = time.perf_counter()
+
         x = np.array((center[0], offset[0], center[1], offset[1]))
         self.kalman.predict()
         self.kalman.update(x)

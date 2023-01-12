@@ -1,26 +1,25 @@
 import time
 import json
-from log import logger
-from mqtt_client import MQTTClient
-from http_service import http_service
 import sys 
 from ctypes import *
 import os
 import numpy as np
 
 from Camera import Camera
-# from FTPService import FTPService
-from GPIO_set import GPIO_set
 import cv2
 import configparser
 
-sys.path.append("/opt/MVS/Samples/aarch64/Python/MvImport")
+#sys.path.append("/opt/MVS/Samples/aarch64/Python/MvImport")
+sys.path.append("D:/MVS/Development/Samples/Python/MvImport")
 from MvCameraControl_class import *
 
 
 class HKCamera(Camera):
     def __init__(self, CameraIdx=0, log_path=None):
+        self.camera = None
+
         # enumerate all the camera devices
+        # the Exception should be handled by its involker
         deviceList = self.enum_devices()
 
         # generate a camera instance
@@ -47,24 +46,17 @@ class HKCamera(Camera):
             raise Exception("destroy handle fail! ret[0x%x]" % ret)
 
     @staticmethod
-    def enum_devices(device=0, device_way=False):
+    def enum_devices():
         """
-        device = 0  枚举网口、USB口、未知设备、cameralink 设备
-        device = 1 枚举GenTL设备
+        枚举网口、USB口、未知设备、cameralink 设备
         """
-        if device_way == False:
-            if device == 0:
-                cameraType = MV_GIGE_DEVICE | MV_USB_DEVICE | MV_UNKNOW_DEVICE | MV_1394_DEVICE | MV_CAMERALINK_DEVICE
-                deviceList = MV_CC_DEVICE_INFO_LIST()
-                # 枚举设备
-                ret = MvCamera.MV_CC_EnumDevices(cameraType, deviceList)
-                if ret != 0:
-                    raise Exception("enum devices fail! ret[0x%x]" % ret)
-                return deviceList
-            else:
-                pass
-        elif device_way == True:
-            pass
+        cameraType = MV_GIGE_DEVICE | MV_USB_DEVICE | MV_UNKNOW_DEVICE | MV_1394_DEVICE | MV_CAMERALINK_DEVICE
+        deviceList = MV_CC_DEVICE_INFO_LIST()
+        # 枚举设备
+        ret = MvCamera().MV_CC_EnumDevices(cameraType, deviceList)
+        if ret != 0:
+            raise Exception("枚举海康相机失败! ret[0x%x]" % ret)
+        return deviceList
 
     def open_camera(self, deviceList, CameraIdx, log_path):
         # generate a camera instance
@@ -226,59 +218,15 @@ class HKCamera(Camera):
         cv2.putText(image,("cputemp = %6.1f C" %(temp1)), (20,70), cv2.FONT_HERSHEY_SIMPLEX, 0.5,255, 1)
         cv2.putText(image,("gputemp = %6.1f C" %(temp2)), (20,90), cv2.FONT_HERSHEY_SIMPLEX, 0.5,255, 1)
 
-class MyClient(MQTTClient):
-    def on_message(self, client, user_data, msg):
-        # todo: 收到消息在这里处理
-        # logger.info('client={}'.format(client))
-        # logger.info('user_data={}'.format(user_data))
-        # logger.info('msg.topic={}'.format(msg.topic))
-        # logger.info('msg.payload={}'.format(msg.payload))
-
-        global x, y, wide, height
-        try:
-            #页面刷新界面的回应
-            if msg.topic == 'zxj/v2/20baa6e650114ef7a9bebd864f4e8db6/read':
-                dict1 = {"timestamp": time.localtime(), "result_code": 0, "result_msg": "success",
-                         "parameter": {"cf1": x, "cf2": y,
-                                       "cf3": wide, "cf4": height}}
-                json_info1 = json.dumps(dict1)
-                rc = self.publish(f'zxj/v2/20baa6e650114ef7a9bebd864f4e8db6/read_ack', json_info1)
-
-            # 将byte转换为string再转换为dictionary
-            new_msg = json.loads(str(msg.payload, encoding='utf-8'))
-
-            #页面设置的回应
-            if msg.topic == 'zxj/v2/20baa6e650114ef7a9bebd864f4e8db6/write':
-                x = new_msg["parameter"]["cf1"]
-                y = new_msg["parameter"]["cf2"]
-                wide = new_msg["parameter"]["cf3"]
-                height = new_msg["parameter"]["cf4"]
-                # 1.0设置发送回复数据
-                dict2 = {"timestamp": time.localtime(), "result_code": 0, "result_msg": "success",
-                         "parameter": {"cf1": new_msg["parameter"]["cf1"], "cf2": new_msg["parameter"]["cf2"],
-                                       "cf3": new_msg["parameter"]["cf3"], "cf4": new_msg["parameter"]["cf4"]}}
-                json_info2 = json.dumps(dict2)
-                self.publish(f'zxj/v2/20baa6e650114ef7a9bebd864f4e8db6/write_ack', json_info2)
-        except Exception as ex:
-            print(ex)
-
 
 if __name__ == '__main__':
-   try:
-        gpio = GPIO_set(pin=7)
-        gpio1=GPIO_set(pin=13)
-        gpio2=GPIO_set(pin=29)
+    camera = HKCamera()
+    while True:
+        img = camera.get_image()
+        cv2.imshow("", img)
+        cv2.waitKey(100)
 
-        flag=0
-        gpio.mode_set(flag=flag)
-        gpio1.mode_set(flag=flag)
-        gpio2.mode_set(flag=1)
-        config = configparser.ConfigParser() # 实例化
-        path=r"/home/cc/new-hkcamera/HKcamera/config.ini"
-        config.read(path)
-
-        camera = HKCamera()
-
+    """
     #     ftp = FTPService(server_ip=config.get("information","server_ip"), server_port=int(config.get("information","server_port")), username=config.get("information","username"), password=config.get("information","password"))
         htp=http_service(url='http://49.232.164.34/api/upload/')
 
@@ -391,12 +339,4 @@ if __name__ == '__main__':
            print(e)
    except Exception as ex:
        print(ex)
-
-
-
-         
-            #clr_image = cv2.resize(clr_image, (800, int(800 * clr_image.shape[0] / clr_image.shape[1])))
-            #cv2.imshow("clear image", clr_image)
-        # if key == ord('e') or key == ord('E'):
-        #     cv2.destroyAllWindows()
-        #     break
+    """
