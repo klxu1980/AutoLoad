@@ -15,6 +15,7 @@ from CoilStatus import CoilExist
 from PLCComm import PLCComm
 from HKCamera import HKCamera
 from CoilImageProc import *
+from TraceCSV import TraceCSV
 from FilePath import PYTHON_PATH
 
 """
@@ -104,17 +105,17 @@ class AutoLoader(object):
 
         # 初始化实际控制使用的硬件
         # 如果硬件打开失败，则退出
-        if not demo_ctrl:
-            if not self.__init_hardwares():
-                exit(0)
+        if not demo_ctrl and not self.__init_hardwares():
+            exit(0)
 
         # 以下变量主要在demo中使用到
         self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
-        self.proc_time = 0.0                                 # 自动上卷算法处理时间
+        self.proc_start_time = 0.0                           # 本次控制周期开始时间
 
         # 试验测试中，如果需要存储每个视频的带卷轨迹数据，则设置save_trace=True
-        self.save_trace = False
+        # 正常现场测试时，默认存储带卷轨迹
         self.csv = None
+        self.save_trace = False
 
         # 保存带卷轨迹跟踪视频
         self.default_saving_path = "e:\\NewTest\\"
@@ -214,25 +215,17 @@ class AutoLoader(object):
     def init_record(self, frame):
         file_path_name = self.default_saving_path + self.datetime_string()
 
-        csv_file = open(file_path_name + ".csv", "w", newline='')
-        self.csv = csv.writer(csv_file)
-
         size = (frame.shape[1], frame.shape[0])
         self.video_raw = cv2.VideoWriter(file_path_name + "-original.mp4", cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
         self.video_proc = cv2.VideoWriter(file_path_name + "-processed.mp4", cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+
+        self.csv = TraceCSV(file_name=file_path_name)
 
     def record_raw_video(self, frame):
         self.video_raw.write(frame)
 
     def record_proc_video(self, frame):
         self.video_proc.write(frame)
-
-    def save_ellipse(self, ellipse):
-        if ellipse is not None:
-            row = ["%d" % value for value in ellipse]
-            time_str = "%1.2f" % self.coil_tracer.proc_interval
-            row.append(time_str)
-            self.csv.writerow(row)
 
     def show_key_operations(self, frame, row_begin):
         row = row_begin
@@ -350,23 +343,22 @@ class AutoLoader(object):
 
     def control(self):
         self.init_one_cycle()
-        start_time = time.perf_counter()
+        self.proc_start_time = time.perf_counter()
         while True:
             # 从摄像头或文件中读取帧。原视图像为灰度图，为了显示清晰，将用于显示的图像调整为彩色图
             frame_4_proc = self.camera.get_image()
             frame = color_image(frame_4_proc)
 
+            # 记录原始视频
             if self.loading_stage != LoadStage.WAITING_4_LOADING:
                 self.record_raw_video(frame)
 
             # 更新PLC状态
+            # 进行一次控制
             self.plc.refresh_status()
-
-            # 对一帧图像进行控制
             self.control_one_frame(frame=frame_4_proc)
 
-            self.proc_time = (time.perf_counter() - start_time) * 1000
-            start_time = time.perf_counter()
+            # 显示控制信息
             frame = self.show_loading_info(frame)
 
             # 显示操作按键
@@ -377,11 +369,15 @@ class AutoLoader(object):
             frame_resized = cv2.resize(frame, (SCREEN_WIDTH, int(SCREEN_WIDTH * frame.shape[0] / frame.shape[1])))
             cv2.imshow("video", frame_resized)
 
+            # 记录控制视频
             if self.loading_stage != LoadStage.WAITING_4_LOADING:
                 self.record_proc_video(frame)
 
+            # 记录上卷期间带卷跟踪，PLC的状态
             if self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-                self.save_ellipse(self.coil_tracer.coil_ellipse)
+                self.csv.record_tracking(self.coil_tracer)
+                self.csv.record_plc(self.plc)
+                self.csv.write_file()
 
             # key operation
             key = cv2.waitKeyEx(0 if self.paused else 10)
@@ -458,7 +454,7 @@ class AutoLoader(object):
 
         self.draw_lines(frame)
 
-        # 显示时间
+        # 显示当前时间
         self.show_text(frame, datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S"), (SCREEN_WIDTH - 100, text_top))
 
         # 显示PLC状态信息
@@ -505,8 +501,10 @@ class AutoLoader(object):
         self.show_text(frame, status_str, (20, text_top))
         text_top += 40
 
-        # 显示计算耗时
-        self.show_text(frame, "computing time = %6.2f ms" % self.proc_time, (20, text_top))
+        # 显示控制周期耗时
+        proc_time = (time.perf_counter() - self.proc_start_time) * 1000
+        self.proc_start_time = time.perf_counter()
+        self.show_text(frame, "Processing time = %6.2f ms" % proc_time, (20, text_top))
 
         return frame
 
