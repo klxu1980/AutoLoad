@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import random
 import cv2
+import glob
+import os
 from CoilNet import CoilNet
 from ImageSet import *
 from CoilImageProc import *
@@ -25,27 +27,34 @@ class CoilLocator(object):
         self.center = None
         self.filter_K = 0.8
 
+        self.ROI = (1000, 0, 2048, 2048)     # left, top, width, height
+
     def load_model(self, model_file):
         self.coil_net.load_model(model_file)
+
+    def resize_image_ROI(self, image):
+        left = self.ROI[0]
+        top = self.ROI[1]
+        width = self.ROI[2]
+        height = self.ROI[3]
+        image = cv2.resize(image[top:top + height, left:left + width], (512, 512))
+        return image
 
     def init_one_cycle(self):
         self.proc_times = 0
 
     def center_by_net(self, frame):
-        resize_x = frame.shape[1] / 512
-        resize_y = frame.shape[0] / 512
-
+        # 将待检测部分压缩至512×512
+        frame = self.resize_image_ROI(frame)
         if len(frame.shape) > 2:
             frame = gray_image(frame)
-        frame = cv2.resize(frame, (512, 512))
-        #cv2.imshow("init", frame)
         frame = norm_image(frame)
 
         # write images into a batch and predict the result
         batch_img = torch.zeros((1, 512, 512), dtype=torch.float32)
         batch_img[0] = torch.from_numpy(frame)
         params = self.coil_net.predict(batch_img)
-        center = np.array((params[0][0] * resize_x, params[0][1] * resize_y))
+        center = np.array((params[0][0], params[0][1])) * (self.ROI[2] / 512.0)
 
         if not self.proc_times:
             self.center = center
@@ -56,7 +65,19 @@ class CoilLocator(object):
         return self.center.astype(np.int32)
 
 
+def build_train_samples(dir):
+    loc = CoilLocator()
+    for file_name in glob.glob(dir + "\\*.jpg"):
+        img = cv2.imread(file_name)
+        img = loc.resize_image_ROI(img)
+        cv2.imwrite(img, file_name)
+
+
 if __name__ == '__main__':
+    build_train_samples("/media/runxin/软件/AutoLoadPython/Loc")
+
+
+    """
     Net = CoilLocator().coil_net
     Net.learn_rate = 0.00001
     Net.l2_lambda = 0.0002
@@ -85,3 +106,4 @@ if __name__ == '__main__':
         eval_set.random_noise = False
         Net.test_net(eval_set)
         #Net.denoise_test(eval_set)
+    """
