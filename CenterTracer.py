@@ -40,6 +40,16 @@ class CenterTracer(object):
         self.diff_offset = (180, -180)
         self.lst_frame = None
 
+        # 带卷小车在受控运动时的速度(像素/秒)，由之前的记录统计获得(CarAnalyzer.py)
+        self.car_spd_up = (0.56556012, 6.48762599)
+        self.car_spd_down = (-0.29603741, 29.85926652)
+        self.car_spd_forward_top = (-29.00687374, 17.43437197)
+        self.car_spd_backward_top = (37.581, -25.205)
+        self.car_spd_forward_btn = (-33.47296442, 34.0856716)
+        self.car_spd_backward_btn = None
+        self.car_K = 0.65
+        self.plc_info_considered = True
+
         # 初始化卡尔曼滤波器
         self.init_kalman()
 
@@ -63,9 +73,11 @@ class CenterTracer(object):
 
         # 跟踪误差
         self.warning = WarningType.ok
-        self.err_fit_vs_exp = None         # 拟合椭圆与预期椭圆比值
-        self.err_cnn_vs_exp = None         # cnn椭圆与预期椭圆比值
-        self.err_cnn_vs_fit = None         # cnn椭圆与拟合椭圆比值
+        self.err_fit_vs_exp = -1         # 拟合椭圆与预期椭圆比值
+        self.err_cnn_vs_exp = -1         # cnn椭圆与预期椭圆比值
+        self.err_cnn_vs_fit = -1         # cnn椭圆与拟合椭圆比值
+        self.err_ellipse    = -1         # 最终椭圆检测结果误差
+        self.err_movement   = -1
 
         # 显示轨迹跟踪
         self.show_fitting = True           # 显示椭圆拟合
@@ -127,10 +139,7 @@ class CenterTracer(object):
 
         self.kalman_trace.clear()
         self.vision_trace.clear()
-
-        self.err_fit_vs_exp = -1
-        self.err_cnn_vs_exp = -1
-        self.err_cnn_vs_fit = -1
+        self.coil_ellipse = None
 
         self.kalman.x = np.array([init_ellipse[0], 0, init_ellipse[1], 0])
 
@@ -213,6 +222,27 @@ class CenterTracer(object):
         self.lst_frame = frame
 
         return off_x, off_y
+
+    def coil_on_top(self):
+        return self.coil_ellipse[1] < 1300
+
+    def car_speed(self, plc):
+        spd = None
+        if plc.car_up:
+            spd = self.car_spd_up
+        elif plc.car_down:
+            spd = self.car_spd_down
+        elif plc.car_forward:
+            spd = self.car_spd_forward_top if self.coil_on_top() else self.car_spd_forward_btn
+        elif plc.car_backward:
+            spd = self.car_spd_backward_top if self.coil_on_top() else self.car_spd_backward_btn
+        else:
+            spd = (0.0, 0.0)
+        return spd
+
+    def offset_by_car_movement(self, plc, interval):
+        spd = self.car_speed(plc)
+        return spd[0] * interval, spd[1] * interval
 
     def ellipse_expected(self, center, neighbor=7):
         if self.exp_ellipse is None:
@@ -298,11 +328,16 @@ class CenterTracer(object):
 
     @staticmethod
     def calc_ellipse_diff(ellipse_exp, ellipse):
-        long_err = math.fabs(ellipse[2] - ellipse_exp[2]) / ellipse_exp[2]
-        short_err = math.fabs(ellipse[3] - ellipse_exp[3]) / ellipse_exp[3]
-        angle_err = math.fabs(ellipse[3] - ellipse_exp[3]) / 360.0
+        # long_err = math.fabs(ellipse[2] - ellipse_exp[2]) / ellipse_exp[2]
+        # short_err = math.fabs(ellipse[3] - ellipse_exp[3]) / ellipse_exp[3]
+        # angle_err = math.fabs(ellipse[3] - ellipse_exp[3]) / 360.0
+        # total_err = math.sqrt(long_err ** 2 + short_err ** 2 + angle_err ** 2)
 
-        total_err = math.sqrt(long_err**2 + short_err**2 + angle_err**2)
+        # 角度误差的量纲和长度不一样，混合在一起比较麻烦，因此不考虑角度误差
+        long_err = (ellipse[2] - ellipse_exp[2]) / ellipse_exp[2]
+        short_err = (ellipse[3] - ellipse_exp[3]) / ellipse_exp[3]
+        total_err = math.sqrt(long_err**2 + short_err**2)
+
         return total_err
 
     @staticmethod
@@ -366,44 +401,41 @@ class CenterTracer(object):
         if self.ellipse_fit is None:
             self.warning = WarningType.ellipse_fitting_failed
 
-        # 如果预期椭圆数据存在，则检查拟合所得椭圆和卷积所得椭圆与其的形态差异
-        self.err_fit_vs_exp = -1
-        self.err_cnn_vs_exp = -1
-        self.err_cnn_vs_fit = -1
-        if self.ellipse_exp is not None:
-            self.err_cnn_vs_exp = self.calc_ellipse_diff(self.ellipse_cnn, self.ellipse_exp)
-            if self.ellipse_fit is not None:
-                self.err_fit_vs_exp = self.calc_ellipse_diff(self.ellipse_fit, self.ellipse_exp)
-        if self.ellipse_fit is not None:
-            self.err_cnn_vs_fit = self.calc_ellipse_diff(self.ellipse_cnn, self.ellipse_fit)
-
         # 综合结果
-        if self.ellipse_fit is not None:
-            if self.ellipse_exp_fit is not None:
-                self.ellipse_vision = ((self.ellipse_fit + self.ellipse_exp_fit) / 2 + 0.5).astype(np.int32)
-            else:
-                self.ellipse_vision = self.ellipse_fit
-        else:
+        # 如果椭圆拟合失败，则采用CNN检测结果
+        # 如果椭圆拟合成功，且用预期椭圆拟合也成功，则对两个椭圆求平均得到结果
+        # 如果椭圆拟合成功，但预期椭圆拟合失败，则用拟合结果
+        if self.ellipse_fit is None:
             self.ellipse_vision = self.ellipse_cnn
+        elif self.ellipse_exp_fit is None:
+            self.ellipse_vision = self.ellipse_fit
+        else:
+            self.ellipse_vision = ((self.ellipse_fit + self.ellipse_exp_fit) / 2 + 0.5).astype(np.int32)
 
         return self.ellipse_vision
 
     def kalman_filter(self, center, offset):
-        # 采样时间间隔
-        self.proc_interval = time.perf_counter() - self.start_time
-        self.start_time = time.perf_counter()
-
         x = np.array((center[0], offset[0], center[1], offset[1]))
         self.kalman.predict()
         self.kalman.update(x)
         return np.array((self.kalman.x[0], self.kalman.x[2]))
 
-    def analyze_one_frame(self, frame):
+    def analyze_one_frame(self, frame, plc=None):
+        # 采样时间间隔
+        self.proc_interval = time.perf_counter() - self.start_time
+        self.start_time = time.perf_counter()
+
         # 基于视觉方式检测带卷内椭圆
         ellipse_vision = self.calc_coil_inner_ellipse(frame, init_ellipse=self.ellipse_kalman)
 
         # locate coil offset by frame difference
         ox, oy = self.offset_by_template(frame, lst_center=self.ellipse_kalman)
+
+        # 可以读取到PLC状态时，利用小车的当前运动方向修正计算带卷的运动偏移量
+        if plc is not None and self.plc_info_considered:
+            ox_car, oy_car = self.offset_by_car_movement(plc, self.proc_interval)
+            ox = ox_car * self.car_K + ox * (1.0 - self.car_K)
+            oy = oy_car * self.car_K + oy * (1.0 - self.car_K)
 
         # kalman filter
         self.ellipse_kalman[0:2] = self.kalman_filter(ellipse_vision, (ox, oy))
@@ -411,13 +443,53 @@ class CenterTracer(object):
                                    ellipse_vision[2:5] * (1.0 - self.low_pass_k)
 
         # 内椭圆整形化，以便于显示
-        self.coil_ellipse = (self.ellipse_kalman + 0.5).astype(np.int32)
+        coil_ellipse = (self.ellipse_kalman + 0.5).astype(np.int32)
+        coil_movement = None
+        if self.coil_ellipse is not None:
+            coil_movement = coil_ellipse - self.coil_ellipse
+        self.coil_ellipse = coil_ellipse
+
+        # 评估检测跟踪误差
+        self.evaluate_tracking(self.coil_ellipse, coil_movement, plc)
 
         # 记录运动轨迹，画图用
         self.kalman_trace.append(self.coil_ellipse)
         self.vision_trace.append(self.ellipse_vision)
 
         return self.coil_ellipse
+
+    def evaluate_tracking(self, ellipse, movement, plc):
+        """
+        评估跟踪质量
+        """
+        # 如果预期椭圆数据存在，则检查拟合所得椭圆和卷积所得椭圆与其的形态差异
+        """
+        self.err_fit_vs_exp = -1
+        self.err_cnn_vs_exp = -1
+        self.err_cnn_vs_fit = -1
+        if self.ellipse_exp is not None:
+            self.err_cnn_vs_exp = self.calc_ellipse_diff(self.ellipse_cnn, self.ellipse_exp)
+        if self.ellipse_exp is not None and self.ellipse_fit is not None:
+            self.err_fit_vs_exp = self.calc_ellipse_diff(self.ellipse_fit, self.ellipse_exp)
+        if self.ellipse_fit is not None:
+            self.err_cnn_vs_fit = self.calc_ellipse_diff(self.ellipse_cnn, self.ellipse_fit)
+        """
+        if self.ellipse_exp is None:
+            self.err_ellipse = np.nan
+        else:
+            self.err_ellipse = self.calc_ellipse_diff(ellipse, self.ellipse_exp)
+
+        # 评估运动量是否出现明显错误
+        if plc is not None and movement is not None:
+            spd = self.car_speed(plc)
+            if spd is None:
+                self.err_movement = np.nan
+            else:
+                exp_x = spd[0] * self.proc_interval
+                exp_y = spd[1] * self.proc_interval
+                err_x = (movement[0] - exp_x) / (exp_x if math.fabs(exp_x) > 1 else 5)
+                err_y = (movement[1] - exp_y) / (exp_y if math.fabs(exp_y) > 1 else 5)
+                self.err_movement = math.sqrt(err_x**2 + err_y**2)
 
     def show_trace(self, frame):
         if self.coil_ellipse is None:

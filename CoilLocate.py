@@ -23,7 +23,7 @@ class CoilLocator(object):
         self.coil_net.init_model()
         self.proc_times = 0
         self.center = None
-        self.filter_K = 0.99
+        self.filter_K = 0.8
 
     def load_model(self, model_file):
         self.coil_net.load_model(model_file)
@@ -37,7 +37,9 @@ class CoilLocator(object):
 
         if len(frame.shape) > 2:
             frame = gray_image(frame)
-        frame = norm_image(cv2.resize(frame, (512, 512)))
+        frame = cv2.resize(frame, (512, 512))
+        #cv2.imshow("init", frame)
+        frame = norm_image(frame)
 
         # write images into a batch and predict the result
         batch_img = torch.zeros((1, 512, 512), dtype=torch.float32)
@@ -77,8 +79,9 @@ if __name__ == '__main__':
         Net.train(train_set, eval_set, epoch_cnt=10000, mini_batch=64)
     else:
         Net.load_model("带卷初始位置2022-08-18-22-55.pt")
-        eval_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\InitPos",
+        eval_set = ImageSet("E:\\Test",   #"E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\InitPos",
                             output_size=LabelType.CenterOnly, img_size=512)
+        eval_set.batch_size = 10
         eval_set.random_noise = False
         Net.test_net(eval_set)
         #Net.denoise_test(eval_set)

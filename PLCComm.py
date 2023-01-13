@@ -1,6 +1,8 @@
 import socket
 import time
 import numpy as np
+import cv2
+from HKCamera import HKCamera
 
 PLC_IP = "8.8.8.140"
 PLC_PORT = 102
@@ -69,17 +71,60 @@ class PLCComm(object):
         self.read_data_key = np.array(read_data_key, dtype=np.uint8)
 
         self.buf_read = None
-
-        # 从PLC中读取到的状态
-        self.heartbeat    = 0  # 心跳信号
-        self.car_up       = 0  # 开卷机小车上升信号
-        self.car_down     = 0  # 开卷机小车下降信号
-        self.car_forward  = 0  # 开卷机小车前进信号
-        self.car_backward = 0  # 开卷机小车后退信号
-        self.support_open = 0  # 开卷机小车支撑信号
+        self.__init_plc_variables()
 
         # TCP
         self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    def __init_plc_variables(self):
+        # 从PLC中读取到的状态
+        self.heartbeat     = 0  # 心跳信号
+        self.car_up        = 0  # 开卷机小车上升信号
+        self.car_down      = 0  # 开卷机小车下降信号
+        self.car_forward   = 0  # 开卷机小车前进信号
+        self.car_backward  = 0  # 开卷机小车后退信号
+        self.support_open  = 0  # 开卷机小车支撑信号
+
+        # 向PLC写的数据
+        self.thread1_heart = 0
+        self.thread2_heart = 0
+
+        self.inner_ellipse  = (0, 0, 0, 0, 0)       # 带卷内椭圆
+        self.outer_ellipse  = (0, 0, 0, 0, 0)
+        self.movement_stage = 0                     # 运动阶段, 0：不运动, 1：上端平移, 2：下降, 3：下端平移
+        self.tracking_acc   = 0.0                   # 运动过程中的跟踪精度
+        self.surplus_horz   = 0.0                   # 平移阶段的距目的地剩余量
+        self.surplus_vert   = 0.0                   # 下降阶段的距目的地剩余量
+
+        self.GuideBoard_Up          = False      # 导板升(1：升, 0：停)
+        self.GuideBoard_Down        = False      # 导板降(1：降, 0：停)
+        self.GuideBoard_Extend      = False      # 导板伸(1：伸, 0：停)
+        self.GuideBoard_Shrink      = False      # 导板缩(1：缩, 0：停)
+        self.PayoffCoilBlock_Expand = False      # 卷筒胀径（1：胀径, 0：缩径）
+        self.JammingRoll_State      = False      # 压辊压下（1：压下, 0：抬起）
+        self.Payoff_PositiveRun     = False      # 卷筒正转（1：正转, 0：停）
+        self.Payoff_NegativeRun     = False      # 卷筒反转（1：反转, 0：停）
+        self.PayoffSupport_Close    = False      # 程序关闭活动支撑
+        self.PayoffSupport_Open     = False      # 程序打开活动支撑
+
+        self.coilload_state         = False      # 上卷状态: 0：未到, 1：到位
+        self.coilopen_state         = False      # 开卷状态: 0：未开, 1：开卷
+        self.ellipse_track_mode     = False      # 椭圆追踪模式
+        self.load_detect_mode       = False      # 上卷检测模式
+        self.open_detect_mode       = False      # 开卷检测模式
+
+        self.order_car_up           = False  # 小车手动命令上升
+        self.order_car_down         = False  # 小车手动命令下降
+        self.order_car_forward      = False  # 小车手动命令前进
+        self.order_car_backward     = False  # 小车手动命令后退
+        self.order_support_open     = False  # 手动支撑状态
+
+        self.g_get_target_flag      = False    # 是否锁定目标（1：锁定, 0：无目标）
+        self.g_AccErr               = False    # 可信度较低报警，当g_acc低于70时，该标志位置1
+        self.g_PstErr               = False    # 钢卷位置越界报警，越界时该标志位置1
+
+        self.definition_rate = 0      # 清晰度百分比
+        self.definition_flag = True   # 清晰度标志位（1：清晰  0：模糊）
 
     def send_tcp(self, order):
         try:
@@ -200,13 +245,75 @@ class PLCComm(object):
             self.car_backward = self.read_bool(29, 3)       # 开卷机小车后退信号
             self.support_open = self.read_bool(29, 4)       # 开卷机支撑信号
 
+    def send_order(self):
+        self.write_short(0, self.thread1_heart)                     # 数据地址30.0   线程1心跳
+        self.write_float(2, float(self.thread2_heart))              # 数据地址32.0，图像处理周期 / 图像处理线程心跳
+        self.write_float(6, float(self.inner_ellipse[0]))           # 数据地址36.0，椭圆中心x
+        self.write_float(10, float(self.inner_ellipse[1]))          # 数据地址40.0，椭圆中心y
+        self.write_float(14, float(self.inner_ellipse[2]))          # 数据地址44.0，椭圆长轴
+        self.write_float(18, float(self.inner_ellipse[3]))          # 数据地址48.0，椭圆短轴
+        self.write_float(22, float(self.movement_stage))            # 数据地址52.0，上卷阶段（0：无目标 1：平移  2：下降  3：对准）
+        self.write_float(26, float(self.tracking_acc))              # 数据地址56.0，可信度 %
+        self.write_float(30, float(self.inner_ellipse[4]))          # 数据地址60.0，椭圆倾斜角
+        self.write_float(34, float(self.surplus_horz))              # 数据地址64.0，平移阶段的剩余距离（mm）
+        self.write_float(38, float(self.surplus_vert))              # 数据地址68.0，下降阶段的剩余距离（mm）
+        self.write_float(42, float(self.definition_rate))           # 数据地址72.0，模糊程度百分比
+
+        self.write_bool(56, 0, self.GuideBoard_Up)                  # 数据地址86.0，导板升(1：升  0：停)
+        self.write_bool(56, 1, self.GuideBoard_Down)                # 数据地址86.1，导板降(1：降  0：停)
+        self.write_bool(56, 2, self.GuideBoard_Extend)              # 数据地址86.2，导板伸(1：伸  0：停)
+        self.write_bool(56, 3, self.GuideBoard_Shrink)              # 数据地址86.3，导板缩(1：缩  0：停)
+        self.write_bool(56, 4, self.PayoffCoilBlock_Expand)         # 数据地址86.4，卷筒胀径（1：胀径  0：缩径）
+        self.write_bool(56, 5, self.JammingRoll_State)              # 数据地址86.5，压辊压下（1：压下  0：抬起）
+        self.write_bool(56, 6, self.Payoff_PositiveRun)             # 数据地址86.6，卷筒正转（1：正转 0：停）
+        self.write_bool(56, 7, self.Payoff_NegativeRun)             # 数据地址86.7，卷筒反转（1：反转 0：停）
+
+        self.write_bool(57, 0, self.PayoffSupport_Close)            # 数据地址87.0，程序关闭活动支撑
+        self.write_bool(57, 1, self.PayoffSupport_Open)             # 数据地址87.1，程序打开活动支撑
+        self.write_bool(57, 2, self.coilload_state)                 # 数据地址87.2，上卷状态  0：未上卷  1：已上卷
+        self.write_bool(57, 3, self.coilopen_state)                 # 数据地址87.3，开卷状态  0：未开卷  1：已开卷
+        self.write_bool(57, 4, self.ellipse_track_mode)             # 数据地址87.4，椭圆追踪
+        self.write_bool(57, 5, self.load_detect_mode)               # 数据地址87.5，上卷检测
+        self.write_bool(57, 6, self.open_detect_mode)               # 数据地址87.6，开卷检测
+        self.write_bool(57, 7, self.definition_flag)                # 数据地址87.7，模糊度标志
+
+        self.write_bool(58, 1, self.order_car_up)                   # 数据地址88.1，写本地命令，上卷小车上升
+        self.write_bool(58, 2, self.order_car_down)                 # 数据地址88.2，写本地命令，上卷小车下降
+        self.write_bool(58, 3, self.order_car_forward)              # 数据地址88.3，写本地命令，上卷小车前进
+        self.write_bool(58, 4, self.order_car_backward)             # 数据地址88.4，写本地命令，上卷小车后退
+
+        self.write_bool(58, 5, self.g_get_target_flag)              # 数据地址88.5，是否锁定目标（1：锁定  0：无目标）
+        self.write_bool(58, 6, self.g_AccErr)                       # 数据地址88.6，可信度较低报警，当可信度低于70时，该标志位置1
+        self.write_bool(58, 7, self.g_PstErr)                       # 数据地址88.7，钢卷位置越界报警，越界时该标志位置1
+
 
 if __name__ == '__main__':
-    time.sleep(0.5)
     plc = PLCComm()
+    camera = HKCamera()
+    SCREEN_WIDTH = 1400
+
     if plc.connect():
         time.sleep(3)
         while True:
-            time.sleep(0.5)
             plc.refresh_status()
-            print((plc.car_up, plc.car_down, plc.car_forward, plc.car_backward))
+            print((plc.heartbeat, plc.car_up, plc.car_down, plc.car_forward, plc.car_backward))
+
+            img = camera.get_image()
+            img = cv2.resize(img, (SCREEN_WIDTH, int(SCREEN_WIDTH * img.shape[0] / img.shape[1])))
+            cv2.imshow("video", img)
+            key = cv2.waitKeyEx(300)
+
+            plc.order_car_up = False
+            plc.order_car_down = False
+            plc.order_car_forward = False
+            plc.order_car_backward = False
+            if key == 2490368:    # up
+                plc.order_car_up = True
+            elif key == 2621440:
+                plc.order_car_down = True
+            elif key == 2424832:
+                plc.order_car_forward = True
+            elif key == 2555904:
+                plc.order_car_backward = True
+            elif key == ord('q'):
+                break

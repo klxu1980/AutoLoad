@@ -57,7 +57,7 @@ INIT_COIL_CENTER = (1800, 630)   # 带卷在堆料区的初始位置。通常会
 AIMING_BEGIN = (1450, 1450)      # 带卷对准开卷机的检测开始和停止位置
 AIMING_END = end_keypoint[0]
 
-SCREEN_WIDTH = 1900
+SCREEN_WIDTH = 1600
 SHOW_EDGE_IN_TEST = False
 
 
@@ -271,6 +271,9 @@ class AutoLoader(object):
         else:
             return 0
 
+    def is_transportion_started(self, frame):
+        pass
+
     def init_one_cycle(self):
         """
         准备开始新带卷的自动上卷控制。只需要上卷时调用一次，也可多次调用，对上卷无影响。
@@ -292,13 +295,13 @@ class AutoLoader(object):
         self.coil_tracer.init_one_cycle(init_ellipse=init_ellipse)
         return coil_center
 
-    def uploading(self, frame):
+    def track_coil(self, frame):
         """
         在上卷过程中，跟踪检测带卷中心椭圆
         :param frame: 由摄像头获得的带卷RGB图像
         :return: 带卷中心椭圆(x, y, long, short, angle)
         """
-        ellipse = self.coil_tracer.analyze_one_frame(frame)  # obtain the center
+        ellipse = self.coil_tracer.analyze_one_frame(frame, self.plc)  # obtain the center
         return ellipse
 
     def is_coil_on_car(self, frame):
@@ -364,6 +367,8 @@ class AutoLoader(object):
             # 显示操作按键
             self.show_text(frame, "R(r): save current picture", (20, 250))
             self.show_text(frame, "Q(q): quit", (20, 250 + 60))
+            self.show_text(frame, "s(S): manually start", (20, 250 + 120))
+            self.show_text(frame, "t(T): manually stop", (20, 250 + 180))
 
             # 视频显示
             frame_resized = cv2.resize(frame, (SCREEN_WIDTH, int(SCREEN_WIDTH * frame.shape[0] / frame.shape[1])))
@@ -386,18 +391,27 @@ class AutoLoader(object):
                 cv2.imwrite(self.datetime_string() + "-original.jpg", frame_4_proc)
             elif key == ord('q') or key == ord('Q'):
                 break
+            elif key == ord('s') or key == ord('S'):
+                self.loading_stage = LoadStage.MOVING_TO_UNPACKER
+                self.init_record(frame)
+            elif key == ord('t') or key == ord('T'):
+                self.loading_stage = LoadStage.WAITING_4_LOADING
+
+    def car_ctrl(self):
+        pass
 
     def control_one_frame(self, frame):
         if self.loading_stage == LoadStage.WAITING_4_LOADING:
             if self.is_coil_on_car(frame):
                 self.wait_for_loading(frame=frame)
-                if self.plc.car_up:
-                    self.loading_stage = LoadStage.MOVING_TO_UNPACKER
-                    self.init_record(frame)
+                # if self.plc.car_up:
+                #     self.loading_stage = LoadStage.MOVING_TO_UNPACKER
+                #     self.init_record(frame)
             else:
                 self.init_one_cycle()
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-            ellipse = self.uploading(frame=frame)
+            ellipse = self.track_coil(frame=frame)
+            self.car_ctrl()
             if ellipse[0] < AIMING_END:
                 self.loading_stage = LoadStage.INTO_UNPACKER
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
@@ -416,7 +430,7 @@ class AutoLoader(object):
             if self.coil_locator.proc_times > 10:
                 self.loading_stage = LoadStage.MOVING_TO_UNPACKER
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-            ellipse = self.uploading(frame=frame)
+            ellipse = self.track_coil(frame=frame)
             if ellipse[0] < AIMING_END:
                 self.loading_stage = LoadStage.INTO_UNPACKER
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
@@ -455,13 +469,13 @@ class AutoLoader(object):
         self.draw_lines(frame)
 
         # 显示当前时间
-        self.show_text(frame, datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S"), (SCREEN_WIDTH - 100, text_top))
+        self.show_text(frame, datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S"), (frame.shape[1] - 600, text_top))
 
         # 显示PLC状态信息
         if not self.demo_ctrl:
-            plc_str = "car moving up: %d, down: %d, forward: %d, backward: %d. support opened: %d" % \
-                      (self.plc.car_up, self.plc.car_down, self.plc.car_forward, self.plc.car_backward,
-                       self.plc.support_open)
+            plc_str = "plc heartbeat: %d, car moving up: %d, down: %d, forward: %d, backward: %d. support opened: %d" % \
+                      (self.plc.heartbeat, self.plc.car_up, self.plc.car_down, self.plc.car_forward,
+                       self.plc.car_backward, self.plc.support_open)
             self.show_text(frame, plc_str, (20, text_top))
         text_top += 40
 
@@ -478,20 +492,19 @@ class AutoLoader(object):
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             status_str = "Moving to the unpacker"
 
-            self.draw_aiming_lines(frame)
             self.coil_tracer.show_trace(frame)
-
             ellipse = self.coil_tracer.coil_ellipse
             if ellipse is not None:
-                status_str += ", coil center = (%d, %d), err(fit/exp) = %.2f, err(cnn/exp) = %.2f, err(cnn/fit) = %.2f" % \
+                status_str += ", coil center = (%d, %d), ellipse error = %5.1f, movement error = %5.1f" % \
                              (ellipse[0], ellipse[1],
-                              self.coil_tracer.err_fit_vs_exp * 100.0,
-                              self.coil_tracer.err_cnn_vs_exp * 100.0,
-                              self.coil_tracer.err_cnn_vs_fit * 100.0)
+                              self.coil_tracer.err_ellipse * 100.0,
+                              self.coil_tracer.err_movement * 100.0)
 
+                """
                 if ellipse[0] < AIMING_BEGIN[0] and ellipse[1] > AIMING_BEGIN[1]:
                     aiming_status = ("position ok", "position low", "position high")
                     status_str += ", " + aiming_status[self.check_aiming_status(ellipse)]
+                """
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
             status = self.coil_pos_status.status
             status_str = "Loading to the unpacker, " + ("loaded" if status else "not loaded")
@@ -579,7 +592,7 @@ class AutoLoader(object):
         if self.loading_stage == 0 or self.loading_stage == 4:
             # 张方远程序中，带卷的跟踪分为了从堆料区到基坑底部，和向开卷机运动两部分(分别是阶段0和4)。算法改进后不再需要分成两部分，
             # 张方远程序中，包含了对内圆和外圆的检测。外圆检测没有实际用处，因此用内圆数据填充占位。
-            ellipse = self.uploading(frame=frame)
+            ellipse = self.track_coil(frame=frame)
             data = [ellipse[0], ellipse[1], ellipse[2], ellipse[3], ellipse[4],
                     ellipse[0], ellipse[1], ellipse[2], ellipse[3], ellipse[4]]
             return data

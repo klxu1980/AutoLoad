@@ -185,11 +185,14 @@ class ImageSet:
 
 if __name__ == '__main__':
     #img_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练集\\smallcoildata\\test", output_size=LabelType.InnerOnly, img_size=512)
-    img_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Train", output_size=LabelType.InnerOnly, img_size=512)
+    #img_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Train", output_size=LabelType.InnerOnly, img_size=512)
+    img_set = ImageSet("E:\\Test", output_size=LabelType.InnerOnly, img_size=512)
     #img_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\InitPos", output_size=LabelType.CenterOnly, img_size=512)
     #img_set.check_image_label()
-    img_set.random_noise = True
+    img_set.random_noise = False
+    img_set.batch_size = 5
     while True:
         _, _, imgs = img_set.random_sample(1)
+        img_set.check_image_label()
         cv2.imshow("", imgs[0])
         cv2.waitKey(0)
