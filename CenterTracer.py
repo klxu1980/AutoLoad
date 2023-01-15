@@ -7,7 +7,10 @@ from enum import Enum
 from CoilNet import CoilNet
 from ImageSet import LabelType
 from ImageSet import ImageSet
+from CoilLocate import CoilLocator
+from CoilStatus import CoilExist
 from CoilImageProc import *
+from FixedParams import *
 
 """
 filterpy需要单独安装，执行指令"pip install filterpy"
@@ -20,6 +23,12 @@ class WarningType(Enum):
     ok = 0
     ellipse_fitting_failed = 1
     ellipse_large_error = 2
+
+
+class TrackingStatus(Enum):
+    no_coil       = 0,         # 没有检测到带卷
+    init_position = 1,         # 正在搜索带卷初始位置
+    tracking      = 2          # 正在跟踪
 
 
 class CenterTracer(object):
@@ -40,13 +49,19 @@ class CenterTracer(object):
         self.diff_offset = (180, -180)
         self.lst_frame = None
 
+        # 带卷是否存在，和带卷初始位置检测
+        self.coil_exist = CoilExist(src_size=1000, src_position=(1550, 0))
+        self.coil_exist.init_model()
+
+        self.coil_locator = CoilLocator()
+
         # 带卷小车在受控运动时的速度(像素/秒)，由之前的记录统计获得(CarAnalyzer.py)
-        self.car_spd_up = (0.56556012, 6.48762599)
-        self.car_spd_down = (-0.29603741, 29.85926652)
-        self.car_spd_forward_top = (-29.00687374, 17.43437197)
-        self.car_spd_backward_top = (37.581, -25.205)
-        self.car_spd_forward_btn = (-33.47296442, 34.0856716)
-        self.car_spd_backward_btn = None
+        self.car_spd_up           = (-4.76538781, 11.23054992)
+        self.car_spd_down         = (0.03374108, 29.97134124)
+        self.car_spd_forward_top  = (-32.10138965, 20.3808698 )
+        self.car_spd_backward_top = (30.50859806, -18.19230394)
+        self.car_spd_forward_btn  = (-19.94236851, 20.00267209)
+        self.car_spd_backward_btn = (np.nan, np.nan)
         self.car_K = 0.65
         self.plc_info_considered = True
 
@@ -79,6 +94,9 @@ class CenterTracer(object):
         self.err_ellipse    = -1         # 最终椭圆检测结果误差
         self.err_movement   = -1
 
+        # 带卷跟踪状态
+        self.tracking_status = TrackingStatus.no_coil
+
         # 显示轨迹跟踪
         self.show_fitting = True           # 显示椭圆拟合
         self.kalman_trace = list()          # 经过卡尔曼滤波后的轨迹
@@ -101,13 +119,13 @@ class CenterTracer(object):
     def init_kalman(self):
         self.kalman = KalmanFilter(dim_x=4, dim_z=4)
         self.kalman.F = np.array([[1.0, 1.0, 0.0, 0.0],
-                                    [0.0, 1.0, 0.0, 0.0],
-                                    [0.0, 0.0, 1.0, 1.0],
-                                    [0.0, 0.0, 0.0, 1.0]])
+                                  [0.0, 1.0, 0.0, 0.0],
+                                  [0.0, 0.0, 1.0, 1.0],
+                                  [0.0, 0.0, 0.0, 1.0]])
         self.kalman.H = np.array([[1.0, 0.0, 0.0, 0.0],
-                                    [0.0, 1.0, 0.0, 0.0],
-                                    [0.0, 0.0, 1.0, 0.0],
-                                    [0.0, 0.0, 0.0, 1.0]])
+                                  [0.0, 1.0, 0.0, 0.0],
+                                  [0.0, 0.0, 1.0, 0.0],
+                                  [0.0, 0.0, 0.0, 1.0]])
         self.kalman.P *= 1
         self.kalman.R *= 0.1
 
@@ -131,6 +149,9 @@ class CenterTracer(object):
     @staticmethod
     def pre_process_image(image):
         return edge_image(image)
+
+    def restart_tracking(self):
+        self.tracking_status = TrackingStatus.no_coil
 
     def init_one_cycle(self, init_ellipse):
         self.lst_frame = None
@@ -223,25 +244,37 @@ class CenterTracer(object):
 
         return off_x, off_y
 
-    def coil_on_top(self):
-        return self.coil_ellipse[1] < 1300
+    def coil_on_top(self, coil_ellipse):
+        return coil_ellipse[1] < 1300
 
-    def car_speed(self, plc):
+    def car_speed(self, coil_ellipse, plc):
         spd = None
         if plc.car_up:
             spd = self.car_spd_up
         elif plc.car_down:
             spd = self.car_spd_down
         elif plc.car_forward:
-            spd = self.car_spd_forward_top if self.coil_on_top() else self.car_spd_forward_btn
+            spd = self.car_spd_forward_top if self.coil_on_top(coil_ellipse) else self.car_spd_forward_btn
         elif plc.car_backward:
-            spd = self.car_spd_backward_top if self.coil_on_top() else self.car_spd_backward_btn
+            spd = self.car_spd_backward_top if self.coil_on_top(coil_ellipse) else self.car_spd_backward_btn
         else:
             spd = (0.0, 0.0)
         return spd
 
-    def offset_by_car_movement(self, plc, interval):
-        spd = self.car_speed(plc)
+    def offset_by_car_movement(self, coil_ellipse, plc, interval):
+        # 应当考虑小车的惯性，建立一个一节惯性模型
+        spd = None
+        if plc.car_up:
+            spd = self.car_spd_up
+        elif plc.car_down:
+            spd = self.car_spd_down
+        elif plc.car_forward:
+            spd = self.car_spd_forward_top if self.coil_on_top(coil_ellipse) else self.car_spd_forward_btn
+        elif plc.car_backward:
+            spd = self.car_spd_backward_top if self.coil_on_top(coil_ellipse) else self.car_spd_backward_btn
+        else:
+            spd = (0.0, 0.0)
+
         return spd[0] * interval, spd[1] * interval
 
     def ellipse_expected(self, center, neighbor=7):
@@ -274,14 +307,17 @@ class CenterTracer(object):
         init_ellipse[0] = init_ellipse[1] = int(self.WINDOW_SIZE / 2)
         proc_image = filter_around_ellipse(proc_image, init_ellipse)
         ellipse = fit_ellipse(proc_image, threshold=50)
-        if ellipse is None:
-            return None
 
         if self.show_fitting:
             img = cv2.cvtColor(proc_image, cv2.COLOR_GRAY2BGR)
-            cv2.ellipse(img, (int(ellipse[0]), int(ellipse[1])), (int(ellipse[2]), int(ellipse[3])), int(ellipse[4]),
-                        0, 360, (0, 255, 0), 1)
+            if ellipse is not None:
+                cv2.ellipse(img, (int(ellipse[0]), int(ellipse[1])), (int(ellipse[2]), int(ellipse[3])),
+                            int(ellipse[4]),
+                            0, 360, (0, 255, 0), 1)
             cv2.imshow("Ellipse fitting", img)
+
+        if ellipse is None:
+            return None
 
         ellipse[0], ellipse[1] = calc_original_pos((ellipse[0], ellipse[1]), self.WINDOW_SIZE, init_center)
         # 对椭圆进行滤波，内圆中心点由卡尔曼滤波，不在这里处理
@@ -351,6 +387,7 @@ class CenterTracer(object):
         cv2.imshow(caption, image)
 
     def calc_coil_inner_ellipse(self, frame, init_ellipse):
+        # 注意：这里存在重复计算图像边缘的问题，需要优化
         self.ellipse_exp = None
         self.ellipse_fit = None
         self.ellipse_exp_fit = None
@@ -420,11 +457,7 @@ class CenterTracer(object):
         self.kalman.update(x)
         return np.array((self.kalman.x[0], self.kalman.x[2]))
 
-    def analyze_one_frame(self, frame, plc=None):
-        # 采样时间间隔
-        self.proc_interval = time.perf_counter() - self.start_time
-        self.start_time = time.perf_counter()
-
+    def track_coil(self, frame, plc, proc_interval):
         # 基于视觉方式检测带卷内椭圆
         ellipse_vision = self.calc_coil_inner_ellipse(frame, init_ellipse=self.ellipse_kalman)
 
@@ -433,9 +466,10 @@ class CenterTracer(object):
 
         # 可以读取到PLC状态时，利用小车的当前运动方向修正计算带卷的运动偏移量
         if plc is not None and self.plc_info_considered:
-            ox_car, oy_car = self.offset_by_car_movement(plc, self.proc_interval)
-            ox = ox_car * self.car_K + ox * (1.0 - self.car_K)
-            oy = oy_car * self.car_K + oy * (1.0 - self.car_K)
+            ox_car, oy_car = self.offset_by_car_movement(ellipse_vision, plc, proc_interval)
+            if ox_car != np.nan:
+                ox = ox_car * self.car_K + ox * (1.0 - self.car_K)
+                oy = oy_car * self.car_K + oy * (1.0 - self.car_K)
 
         # kalman filter
         self.ellipse_kalman[0:2] = self.kalman_filter(ellipse_vision, (ox, oy))
@@ -450,30 +484,78 @@ class CenterTracer(object):
         self.coil_ellipse = coil_ellipse
 
         # 评估检测跟踪误差
-        self.evaluate_tracking(self.coil_ellipse, coil_movement, plc)
+        self.evaluate_tracking(self.coil_ellipse, coil_movement, plc, proc_interval)
 
         # 记录运动轨迹，画图用
         self.kalman_trace.append(self.coil_ellipse)
         self.vision_trace.append(self.ellipse_vision)
+        if len(self.kalman_trace) > 100:
+            self.kalman_trace.pop(0)
+        if len(self.vision_trace) > 100:
+            self.vision_trace.pop(0)
 
-        return self.coil_ellipse
+    def analyze_one_frame(self, frame, plc=None):
+        # 采样时间间隔
+        self.proc_interval = time.perf_counter() - self.start_time
+        self.start_time = time.perf_counter()
 
-    def evaluate_tracking(self, ellipse, movement, plc):
+        if self.tracking_status == TrackingStatus.no_coil:
+            if self.coil_exist.analyze_one_frame(frame):
+                self.tracking_status = TrackingStatus.init_position
+            self.coil_locator.init_one_cycle()
+        elif self.tracking_status == TrackingStatus.init_position:
+            self.coil_locator.analyze_one_frame(frame)
+            center = self.coil_locator.center
+            # if not self.ellipse_out_of_bound(center):
+            if end_keypoint[0] < center[0] < start_keypoint[0]:
+                self.init_one_cycle(init_ellipse=(center[0], center[1], 100, 100, 0))
+                self.tracking_status = TrackingStatus.tracking
+        else:
+            self.track_coil(frame, plc, self.proc_interval)
+
+    @staticmethod
+    def calc_supposed_y(begin, end, x):
+        k = (end[1] - begin[1]) / (end[0] - begin[0])
+        y = (x - begin[0]) * k + begin[1]
+        return y
+
+    @staticmethod
+    def calc_supposed_x(begin, end, y):
+        k = (end[0] - begin[0]) / (end[1] - begin[1])
+        x = (y - begin[1]) * k + begin[0]
+        return x
+
+    def ellipse_out_of_bound(self, center):
+        if center[0] > start_keypoint[0] or center[0] < end_keypoint[0]:
+            # print("越界退出, x = %1.1f, y = %1.1f" % (center[0], center[0]))
+            return True
+        elif center[0] > drop_keypoint[0] + 100:
+            y = self.calc_supposed_y(start_keypoint, drop_keypoint, center[0])
+            if math.fabs(center[1] - y) > 100:
+                print("x = %1.1f, 预期高度 %1.1f, 实测高度 %1.1f" % (center[0], y, center[1]))
+                return True
+        elif center[0] < drop_keypoint[0] - 100:
+            y = self.calc_supposed_y(alignment_keypoint, end_keypoint, center[0])
+            if math.fabs(center[1] - y) > 100:
+                print("x = %1.1f, 预期高度 %1.1f, 实测高度 %1.1f" % (center[0], y, center[1]))
+                return True
+        else:
+            x = self.calc_supposed_x(drop_keypoint, alignment_keypoint, center[1])
+            if math.fabs(center[0] - x) > 200:
+                print("y = %1.1f, 预期位置 %1.1f, 实测位置 %1.1f" % (center[1], x, center[0]))
+                return True
+        return False
+
+    def evaluate_tracking(self, ellipse, movement, plc, proc_interval):
         """
         评估跟踪质量
         """
+        # 检查绝对位置是否超限
+        if self.ellipse_out_of_bound(ellipse):
+            self.restart_tracking()
+            return
+
         # 如果预期椭圆数据存在，则检查拟合所得椭圆和卷积所得椭圆与其的形态差异
-        """
-        self.err_fit_vs_exp = -1
-        self.err_cnn_vs_exp = -1
-        self.err_cnn_vs_fit = -1
-        if self.ellipse_exp is not None:
-            self.err_cnn_vs_exp = self.calc_ellipse_diff(self.ellipse_cnn, self.ellipse_exp)
-        if self.ellipse_exp is not None and self.ellipse_fit is not None:
-            self.err_fit_vs_exp = self.calc_ellipse_diff(self.ellipse_fit, self.ellipse_exp)
-        if self.ellipse_fit is not None:
-            self.err_cnn_vs_fit = self.calc_ellipse_diff(self.ellipse_cnn, self.ellipse_fit)
-        """
         if self.ellipse_exp is None:
             self.err_ellipse = np.nan
         else:
@@ -481,15 +563,11 @@ class CenterTracer(object):
 
         # 评估运动量是否出现明显错误
         if plc is not None and movement is not None:
-            spd = self.car_speed(plc)
-            if spd is None:
-                self.err_movement = np.nan
-            else:
-                exp_x = spd[0] * self.proc_interval
-                exp_y = spd[1] * self.proc_interval
-                err_x = (movement[0] - exp_x) / (exp_x if math.fabs(exp_x) > 1 else 5)
-                err_y = (movement[1] - exp_y) / (exp_y if math.fabs(exp_y) > 1 else 5)
-                self.err_movement = math.sqrt(err_x**2 + err_y**2)
+            exp_ox, exp_oy = self.offset_by_car_movement(ellipse, plc, proc_interval)
+            if exp_ox != np.nan:
+                err_x = (movement[0] - exp_ox) / (exp_ox * 1.5 if math.fabs(exp_ox) > 1 else 5)
+                err_y = (movement[1] - exp_oy) / (exp_oy * 1.5 if math.fabs(exp_oy) > 1 else 5)
+                self.err_movement = math.sqrt(err_x ** 2 + err_y ** 2)
 
     def show_trace(self, frame):
         if self.coil_ellipse is None:

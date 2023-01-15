@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 from enum import Enum
 
 
@@ -11,6 +12,7 @@ class ExposureStatus(Enum):
 class Camera(object):
     def __init__(self):
         self.ROI = None
+        self.image = None
 
     def __eval_clarity(self, image):
         return cv2.Laplacian(image, cv2.CV_64F).var()
@@ -40,8 +42,24 @@ class Camera(object):
         else:
             return mat[self.ROI[1]: self.ROI[3], self.ROI[0]: self.ROI[2]]
 
+    def refresh(self):
+        pass
+
     def get_image(self, width=None):
-        return None
+        return self.image
+
+    def get_histogram(self, ROI=None):
+        image = self.image if ROI is None else self.image[ROI[1]: ROI[1] + ROI[3], ROI[0]: ROI[0] + ROI[2]]
+        hist, _ = np.histogram(image.flatten(), 256)
+        dist = hist / hist.max()
+        return hist, dist
+
+    def draw_histogram(self, hist):
+        img = np.zeros((100, 256), dtype=np.uint8)
+        for i, h in enumerate(hist):
+            v = int(h * 100)
+            img[100 - v: 100, i] = 255
+        return img
 
     def set_exposure_time(self, exp_time):
         pass

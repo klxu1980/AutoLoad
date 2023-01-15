@@ -29,16 +29,29 @@ def color_image(image):
     return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
 
-def edge_image(image):
+def edge_image_old(image):
     # For some unknown reason a grayed image will cause error in detectEdges(),
     # so a grayed image need be transformed to a colored image.
     if len(image.shape) == 2:
         image = color_image(image)
     image = np.float32(image) * (1.0 / 255.0)
-    #edge_detector = cv2.ximgproc.createStructuredEdgeDetection("model.yml.gz")
     edge = edge_detector.detectEdges(image)
     max_value = np.max(edge)
-    return (edge * 255 / max_value).astype(np.uint8)
+    edge_img = (edge * 255 / max_value).astype(np.uint8)
+    return edge_img
+
+
+def edge_image(image):
+    raw_img = image.copy()
+    edge1 = edge_image_old(raw_img)
+
+    # image = cv2.equalizeHist(image)
+    # edge2 = edge_image_old(image)
+    #
+    # img = np.hstack((edge1, edge2))
+    # cv2.imshow("", img)
+
+    return edge1
 
 
 def norm_image(image):
@@ -145,6 +158,26 @@ def calc_original_pos(pos, img_size, init_center):
     x = pos[0] - img_size / 2 + init_center[0]
     y = pos[1] - img_size / 2 + init_center[1]
     return x, y
+
+
+def extract_filename_params(file_name):
+    params = file_name.split('.')[0].split('-')
+    return params
+
+
+def image_histogram(image):
+    hist, _ = np.histogram(image.flatten(), 256)
+    dist = hist / hist.max()
+    return hist, dist
+
+
+def draw_histogram(hist):
+    img = np.zeros((100, 256), dtype=np.uint8)
+    if hist is not None:
+        for i, h in enumerate(hist):
+            v = int(h * 100)
+            img[100 - v: 100, i] = 255
+    return img
 
 
 if __name__ == '__main__':

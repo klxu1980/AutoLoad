@@ -60,7 +60,7 @@ class BaseImageNet(object):
         self.l2_lambda = 0.0002
         self.dropout_rate = 0.4
 
-        self.save_dir = None
+        self.save_dir = ""
         self.save_prefix = None
         self.save_interval = 3000
         self.NO_CUDA = False
@@ -137,7 +137,7 @@ class BaseImageNet(object):
         if self.save_prefix is None:
             path = dir + datetime.datetime.now().strftime("/%Y-%m-%d-%H-%M.pt")
         else:
-            path = dir + '/' + self.save_prefix + datetime.datetime.now().strftime("%Y-%m-%d-%H-%M.pt")
+            path = dir + self.save_prefix + datetime.datetime.now().strftime("%Y-%m-%d-%H-%M.pt")
         torch.save(self.model.state_dict(), path)
 
     def load_model(self, file_name):

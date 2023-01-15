@@ -10,7 +10,7 @@ import cv2
 import configparser
 
 #sys.path.append("/opt/MVS/Samples/aarch64/Python/MvImport")
-sys.path.append("D:/MVS/Development/Samples/Python/MvImport")
+sys.path.append("D:/MVS/Development/Samples/Python/MvImport")   # 注意：需要根据机器上的实际安装路径进行修改
 from MvCameraControl_class import *
 
 
@@ -194,7 +194,7 @@ class HKCamera(Camera):
     def get_exposure_time(self):
         return self.get_Value(param_type="float_value", node_name="ExposureTime")
 
-    def get_image(self, width=None):
+    def refresh(self):
         """
         :param cam:     相机实例
         :active_way:主动取流方式的不同方法 分别是（getImagebuffer）（getoneframetimeout）
@@ -202,13 +202,9 @@ class HKCamera(Camera):
         """
         ret = self.camera.MV_CC_GetOneFrameTimeout(self.pData, self.nDataSize, self.stFrameInfo, 1000)
         if ret == 0:
-            image = np.asarray(self.pData).reshape((self.stFrameInfo.nHeight, self.stFrameInfo.nWidth))
-            if width is not None:
-                image = cv2.resize(image, (width, int(self.stFrameInfo.nHeight * width / self.stFrameInfo.nWidth)))
-                pass
-            return image
+            self.image = np.asarray(self.pData).reshape((self.stFrameInfo.nHeight, self.stFrameInfo.nWidth))
         else:
-            return None
+            self.image = None
 
     def show_runtime_info(self, exp_time,image):
         #exp_time = self.get_exposure_time()
@@ -223,6 +219,8 @@ if __name__ == '__main__':
     camera = HKCamera()
     while True:
         img = camera.get_image()
+        exp = camera.get_exposure_time()
+        print(exp)
         cv2.imshow("", img)
         cv2.waitKey(100)
 
