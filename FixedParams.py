@@ -11,7 +11,7 @@ PositionL3P2 = (1880, 1950)  # 定位线3点2
 start_keypoint = (1900, 500)  # 全局点:预测大卷起始点
 start_keypoint1 = (1900, 530) # 全局点:预测小卷起始点
 
-drop_keypoint = (1400,800)   # 全局点：大卷关键点下降点
+drop_keypoint = (1400, 800)   # 全局点：大卷关键点下降点
 drop_keypoint1 = (1400, 830) # 全局点：小卷关键点下降点
 
 alignment_keypoint = (1420, 1510) # 全局点：关键点对准点

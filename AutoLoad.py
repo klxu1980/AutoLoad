@@ -57,17 +57,19 @@ class LoadStage(Enum):
 
 
 class AutoLoader(object):
-    def __init__(self, demo_ctrl=True, auto_ctrl=False):
-        self.demo_ctrl = demo_ctrl
-        self.auto_ctrl = auto_ctrl
+    def __init__(self, run_as_demo=True, run_as_monitor=False):
+        self.run_as_demo = run_as_demo
+        self.run_as_monitor = run_as_monitor
 
         # 加载各个检测模型
         self.__load_models()
 
         # 初始化实际控制使用的硬件
         # 如果硬件打开失败，则退出
-        if not demo_ctrl and not self.__init_hardwares():
+        if not run_as_demo and not self.__init_hardwares():
             exit(0)
+
+        self.demo_video = None    # 当前的demo视频
 
         # 以下变量主要在demo中使用到
         self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
@@ -95,14 +97,14 @@ class AutoLoader(object):
 
         self.loading_trigged = False
         self.equalize_image = False
-        self.moving_start_time = None
+        self.uploading_start_time = None     # 上卷开始时间
 
     def __load_models(self):
-        # self.coil_tracer是核心跟踪器
-        self.coil_tracer = CenterTracer()
-        self.coil_tracer.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
-        self.coil_tracer.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
-        self.coil_tracer.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-01-14-11-44.pt")    # 鞍座检测器，判断带卷是否在鞍座上
+        # self.coil_tracker是核心跟踪器
+        self.coil_tracker = CenterTracer()
+        self.coil_tracker.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
+        self.coil_tracker.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
+        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-01-14-11-44.pt")    # 鞍座检测器，判断带卷是否在鞍座上
 
         # 上卷检测器
         self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
@@ -187,24 +189,36 @@ class AutoLoader(object):
 
     def show_key_operations(self, frame, row_begin):
         row = row_begin
-        self.show_text(frame, "P(p): pause", (20, row))
-        row += 60
-        self.show_text(frame, "->: move forward", (20, row))
-        row += 60
-        self.show_text(frame, "<-: move backward", (20, row))
-        row += 60
-        self.show_text(frame, "S(s): start tracing and recording", (20, row))
-        row += 60
-        self.show_text(frame, "E(e): stop tracing and recording", (20, row))
-        row += 60
-        self.show_text(frame, "R(r): save current picture", (20, row))
-        row += 60
-        self.show_text(frame, "L(l): detect if the coil is loaded", (20, row))
-        row += 60
-        self.show_text(frame, "O(o): detect if the coil is opened", (20, row))
-        row += 60
-        self.show_text(frame, "g(G): show coil edge", (20, row))
-        row += 60
+        if self.run_as_demo:
+            self.show_text(frame, "P(p): pause", (20, row))
+            row += 60
+            self.show_text(frame, "->: move forward", (20, row))
+            row += 60
+            self.show_text(frame, "<-: move backward", (20, row))
+            row += 60
+            self.show_text(frame, "S(s): start tracing and recording", (20, row))
+            row += 60
+            self.show_text(frame, "E(e): stop tracing and recording", (20, row))
+            row += 60
+            self.show_text(frame, "R(r): save current picture", (20, row))
+            row += 60
+            self.show_text(frame, "L(l): detect if the coil is loaded", (20, row))
+            row += 60
+            self.show_text(frame, "O(o): detect if the coil is opened", (20, row))
+            row += 60
+            self.show_text(frame, "g(G): show coil edge", (20, row))
+            row += 60
+        else:
+            self.show_text(frame, "R(r): save current picture", (20, row))
+            row += 60
+            self.show_text(frame, "Q(q): quit", (20, row))
+            row += 60
+            self.show_text(frame, "s(S): manually start", (20, row))
+            row += 60
+            self.show_text(frame, "t(T): manually stop", (20, row))
+            row += 60
+            self.show_text(frame, "f(F): show edge", (20, row))
+            row += 60
         return row
 
     def draw_aiming_lines(self, image):
@@ -229,8 +243,13 @@ class AutoLoader(object):
         else:
             return 0
 
-    def is_transportion_started(self, frame):
-        pass
+    def get_one_frame(self):
+        if self.run_as_demo:
+            frame = self.demo_video.get_frame()
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            self.camera.refresh()
+            return self.camera.get_image()
 
     def init_one_cycle(self):
         """
@@ -239,7 +258,7 @@ class AutoLoader(object):
         """
         # init_ellipse = (INIT_COIL_CENTER[0], INIT_COIL_CENTER[1], 0, 0, 0)
         # self.coil_locator.init_one_cycle()
-        # self.coil_tracer.init_one_cycle(init_ellipse=init_ellipse)
+        # self.coil_tracker.init_one_cycle(init_ellipse=init_ellipse)
         self.loading_stage = LoadStage.WAITING_4_LOADING
 
     def wait_for_loading(self, frame):
@@ -250,24 +269,16 @@ class AutoLoader(object):
         """
         coil_center = self.coil_locator.center_by_net(frame)
         init_ellipse = (coil_center[0], coil_center[1], 100, 100, 0)  # 椭圆初始信息仅包含中心坐标，长短轴和角度忽略(随便填数)
-        self.coil_tracer.init_one_cycle(init_ellipse=init_ellipse)
+        self.coil_tracker.init_one_cycle(init_ellipse=init_ellipse)
         return coil_center
 
-    def track_coil(self, frame):
+    def track_coil(self, frame, plc):
         """
         在上卷过程中，跟踪检测带卷中心椭圆
         :param frame: 由摄像头获得的带卷RGB图像
         :return: 带卷中心椭圆(x, y, long, short, angle)
         """
-        self.coil_tracer.analyze_one_frame(frame, self.plc)  # obtain the center
-
-    def is_coil_on_car(self, frame):
-        """
-        检查带卷是否在小车上
-        """
-        #status = self.coil_exist_status.analyze_one_frame(frame)
-        #return status
-        return True
+        self.coil_tracker.analyze_one_frame(frame, plc)  # obtain the center
 
     def init_one_test_cycle(self, file_name):
         self.init_one_cycle()
@@ -287,53 +298,49 @@ class AutoLoader(object):
     def control(self):
         self.init_one_cycle()
         self.proc_start_time = time.perf_counter()
-        while True:
-            # 从摄像头或文件中读取帧。原视图像为灰度图，为了显示清晰，将用于显示的图像调整为彩色图
-            self.camera.refresh()
-            frame_4_proc = self.camera.get_image()
-            frame = color_image(frame_4_proc)
-            if self.equalize_image:
-                frame_4_proc = cv2.equalizeHist(frame_4_proc)
 
-            # 记录原始视频
-            if self.loading_stage != LoadStage.WAITING_4_LOADING:
-                self.record_raw_video(frame)
+        while True:
+            # 实际控制时，从摄像头中读取一帧。示例和测试时，从视频文件中读取一帧。
+            # 摄像头读取的数据为灰度图，为了显示清晰，将用于显示的图像调整为彩色图
+            frame_gray = self.get_one_frame()
+            frame_bgr = color_image(frame_gray)
+
+            # 在现场实测时，一旦开始上卷，则记录原始视频
+            if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
+                self.record_raw_video(frame_bgr)
 
             # 更新PLC状态
-            # 进行一次检测，暂时先不做控制
-            self.plc.refresh_status()
-            self.track_one_frame(frame=frame_4_proc)
+            if self.plc is not None:
+                self.plc.refresh_status()
+
+            # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
+            self.track_one_frame(frame=frame_gray, plc=self.plc)
             self.car_ctrl()
 
-            # 显示控制信息
-            # 显示操作按键
-            frame = self.show_loading_info(frame)
-            self.show_text(frame, "R(r): save current picture", (20, 400))
-            self.show_text(frame, "Q(q): quit", (20, 400 + 60))
-            self.show_text(frame, "s(S): manually start", (20, 400 + 120))
-            self.show_text(frame, "t(T): manually stop", (20, 400 + 180))
-            self.show_text(frame, "e(E): equalize image", (20, 400 + 240))
-            self.show_text(frame, "f(F): show edge", (20, 400 + 300))
+            # 显示控制信息和操作按钮
+            frame_bgr = self.show_loading_info(frame=frame_bgr, top=40)
+            frame_bgr = self.show_key_operations(frame_bgr, row_begin=400)
 
-            # 记录控制视频
-            if self.loading_stage != LoadStage.WAITING_4_LOADING:
-                self.record_proc_video(frame)
+            # 在现场实测时，一旦开始上卷，同时记录实际控制视频
+            if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
+                self.record_proc_video(frame_bgr)
 
-            # 记录上卷期间带卷跟踪，PLC的状态
+            # 记录上卷期间带卷跟踪、PLC的状态
             if self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-                self.csv.record_tracking(self.coil_tracer)
+                self.csv.record_tracking(self.coil_tracker)
                 self.csv.record_plc(self.plc)
                 self.csv.write_file()
 
             # 视频显示
-            frame_resized = cv2.resize(frame, (SCREEN_WIDTH, int(SCREEN_WIDTH * frame.shape[0] / frame.shape[1])))
-            cv2.imshow("video", frame_resized)
+            frame_resized = cv2.resize(frame_bgr,
+                                       (SCREEN_WIDTH, int(SCREEN_WIDTH * frame_bgr.shape[0] / frame_bgr.shape[1])))
+            cv2.imshow("control monitor", frame_resized)
 
             # key operation
             key = cv2.waitKeyEx(0 if self.paused else 10)
             if key == ord('R') or key == ord('r'):
                 cv2.imwrite(self.datetime_string() + "-processed.jpg", frame)
-                cv2.imwrite(self.datetime_string() + "-original.jpg", frame_4_proc)
+                cv2.imwrite(self.datetime_string() + "-original.jpg", frame_gray)
             elif key == ord('q') or key == ord('Q'):
                 break
             elif key == ord('s') or key == ord('S'):
@@ -344,34 +351,40 @@ class AutoLoader(object):
             elif key == ord('e') or key == ord('E'):
                 self.equalize_image = not self.equalize_image
             elif key in (ord('f'), ord('F')):
-                self.coil_tracer.show_fitting = not self.coil_tracer.show_fitting
+                self.coil_tracker.show_fitting = not self.coil_tracker.show_fitting
 
-    def car_ctrl(self):
-        pass
+    def track_one_frame(self, frame, plc):
+        # 在监视模式下，上卷终止有可能判断错误，导致始终处于上卷状态
+        # 因此，判断上卷开始后，开始计时，如果1分钟内还没有结束，则强制进入等待上卷状态
+        if self.uploading_start_time is not None and time.perf_counter() - self.uploading_start_time > 60.0:
+            self.loading_stage = LoadStage.WAITING_4_LOADING
 
-    def track_one_frame(self, frame):
+        # 目前带卷跟踪仅用于监视带卷位置
         if self.loading_stage == LoadStage.WAITING_4_LOADING:
-            self.track_coil(frame=frame)
-            ellipse = self.coil_tracer.coil_ellipse
-            if ellipse is None:
+            self.uploading_start_time = None
+
+            # 检测跟踪带卷，如果带卷不存在，则返回None
+            self.coil_tracker.analyze_one_frame(frame, plc)
+            if self.coil_tracker.coil_ellipse is None:
                 return
 
-            if ellipse[0] > 1850:
-                self.loading_trigged = True
-            elif self.loading_trigged and ellipse[0] < 1800:
+            # 当带卷位置小于1800时，认为开始上卷
+            if self.coil_tracker.coil_ellipse[0] < 1800:
                 self.loading_stage = LoadStage.MOVING_TO_UNPACKER
-                self.loading_trigged = False
-                self.init_record(frame)
-                self.moving_start_time = time.perf_counter()
+                self.uploading_start_time = time.perf_counter()
+                if not self.run_as_demo:
+                    self.init_record(frame)
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-            self.track_coil(frame=frame)
-            if self.coil_tracer.tracking_status in (TrackingStatus.no_coil, TrackingStatus.init_position):
+            # 跟踪带卷位置
+            # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
+            self.coil_tracker.analyze_one_frame(frame, plc)
+            if self.coil_tracker.tracking_status in (TrackingStatus.no_coil, TrackingStatus.init_position):
                 self.loading_stage = LoadStage.WAITING_4_LOADING
+                return
 
-            ellipse = self.coil_tracer.coil_ellipse
-            if ellipse is not None and (ellipse[0] < end_keypoint[0] or (ellipse[0] > 1800 and time.perf_counter() - self.moving_start_time > 30.0)):
-                self.loading_stage = LoadStage.WAITING_4_LOADING
-                #self.loading_stage = LoadStage.INTO_UNPACKER
+            # 如果带卷位置小于上卷终止位置，则检测带卷是否已装入开卷机
+            if self.coil_tracker.coil_ellipse[0] < end_keypoint[0]:
+                self.loading_stage = LoadStage.INTO_UNPACKER
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
             status = self.coil_pos_status.analyze_one_frame(frame)
             if status:
@@ -379,7 +392,10 @@ class AutoLoader(object):
         elif self.loading_stage == LoadStage.UNPACKING:
             status = self.coil_open_status.analyze_one_frame(frame)
             if status:
-                self.init_one_cycle()
+                self.loading_stage = LoadStage.WAITING_4_LOADING
+
+    def car_ctrl(self):
+        pass
 
     def control_demo(self, frame):
         start_time = time.perf_counter()
@@ -423,7 +439,7 @@ class AutoLoader(object):
         cv2.line(frame, stage3_up1, stage3_up2, (20, 20, 255), 2)
         cv2.line(frame, stage3_down1, stage3_down2, (20, 20, 255), 2)
 
-    def show_loading_info(self, frame):
+    def show_loading_info(self, frame, top):
         text_top = 40
 
         self.draw_lines(frame)
@@ -447,10 +463,10 @@ class AutoLoader(object):
                 text_top += 40
 
         center = None
-        if self.coil_tracer.coil_ellipse is not None:
-            center = self.coil_tracer.coil_ellipse
-        elif self.coil_tracer.coil_locator.center is not None:
-            center = self.coil_tracer.coil_locator.center
+        if self.coil_tracker.coil_ellipse is not None:
+            center = self.coil_tracker.coil_ellipse
+        elif self.coil_tracker.coil_locator.center is not None:
+            center = self.coil_tracker.coil_locator.center
         if center is not None:
             image = frame[center[1] - 256: center[1] + 256, center[0] - 256: center[0] + 256]
             _, dist = image_histogram(image)
@@ -460,20 +476,20 @@ class AutoLoader(object):
 
         # 正在跟踪带卷，显示跟踪状态信息
         status_str = ""
-        if self.coil_tracer.tracking_status == TrackingStatus.tracking:
+        if self.coil_tracker.tracking_status == TrackingStatus.tracking:
             status_str = "Tracking coil"
-            self.coil_tracer.show_trace(frame)
-            ellipse = self.coil_tracer.coil_ellipse
+            self.coil_tracker.show_trace(frame)
+            ellipse = self.coil_tracker.coil_ellipse
             if ellipse is not None:
                 status_str += ", center = (%d, %d), ellipse error = %5.1f, movement error = %5.1f" % \
                               (ellipse[0], ellipse[1],
-                               self.coil_tracer.err_ellipse * 100.0,
-                               self.coil_tracer.err_movement * 100.0)
-        elif self.coil_tracer.tracking_status == TrackingStatus.no_coil:
+                               self.coil_tracker.err_ellipse * 100.0,
+                               self.coil_tracker.err_movement * 100.0)
+        elif self.coil_tracker.tracking_status == TrackingStatus.no_coil:
             status_str = "No coil"
-        elif self.coil_tracer.tracking_status == TrackingStatus.init_position:
+        elif self.coil_tracker.tracking_status == TrackingStatus.init_position:
             status_str = "Initializing coil center"
-            init_center = self.coil_tracer.coil_locator.center
+            init_center = self.coil_tracker.coil_locator.center
             if init_center is not None:
                 cv2.circle(frame, center=(init_center[0], init_center[1]), radius=5, color=(0, 0, 255), thickness=2)
         self.show_text(frame, status_str, (20, text_top))
@@ -495,13 +511,13 @@ class AutoLoader(object):
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             status_str = "Moving to the unpacker"
 
-            # self.coil_tracer.show_trace(frame)
-            # ellipse = self.coil_tracer.coil_ellipse
+            # self.coil_tracker.show_trace(frame)
+            # ellipse = self.coil_tracker.coil_ellipse
             # if ellipse is not None:
             #     status_str += ", coil center = (%d, %d), ellipse error = %5.1f, movement error = %5.1f" % \
             #                  (ellipse[0], ellipse[1],
-            #                   self.coil_tracer.err_ellipse * 100.0,
-            #                   self.coil_tracer.err_movement * 100.0)
+            #                   self.coil_tracker.err_ellipse * 100.0,
+            #                   self.coil_tracker.err_movement * 100.0)
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
             status = self.coil_pos_status.status
             status_str = "Loading to the unpacker, " + ("loaded" if status else "not loaded")
@@ -542,8 +558,8 @@ class AutoLoader(object):
             self.save_video(frame_resized)
 
             if self.loading_stage == LoadStage.MOVING_TO_UNPACKER and self.save_trace and \
-                    self.coil_tracer.coil_ellipse[0] < 1800:
-                self.save_ellipse(self.coil_tracer.coil_ellipse)
+                    self.coil_tracker.coil_ellipse[0] < 1800:
+                self.save_ellipse(self.coil_tracker.coil_ellipse)
 
             # key operation
             key = cv2.waitKeyEx(0 if self.paused else 10)
@@ -640,7 +656,7 @@ def file_name(file_dir):
 
 def demo_test():
     auto_loader = AutoLoader()
-    auto_loader.coil_tracer.read_trace_stat("trace_stat.csv")
+    auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
     init_pos = None
 
     print("1: Test on normal cases")
@@ -658,7 +674,7 @@ def demo_test():
         os.chdir("G:\\01 自动上卷视频\\bad cases")
     elif mode == "3":
         auto_loader.save_trace = True
-        auto_loader.coil_tracer.exp_ellipse = None
+        auto_loader.coil_tracker.exp_ellipse = None
         os.chdir("G:\\01 自动上卷视频\\内椭圆参数统计视频")
     elif mode == "4":
         init_pos = (1405, 1525)
@@ -679,7 +695,7 @@ def demo_test():
     else:
         # 再给定目录下枚举所有的带卷视频，记录带卷轨迹
         auto_loader.save_trace = True
-        auto_loader.coil_tracer.exp_ellipse = None
+        auto_loader.coil_tracker.exp_ellipse = None
         for root, dirs, files in os.walk("E:\\20220521-20220621数据"):
             for _, file in enumerate(files):
                 if os.path.splitext(file)[-1] == ".avi" and "orginal" in os.path.splitext(file)[0]:
@@ -703,6 +719,6 @@ def real_control():
 if __name__ == '__main__':
     # demo_test()
 
-    auto_loader = AutoLoader(demo_ctrl=False)
-    auto_loader.coil_tracer.read_trace_stat("trace_stat.csv")
+    auto_loader = AutoLoader(run_as_demo=False)
+    auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
     auto_loader.control()

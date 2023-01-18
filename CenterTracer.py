@@ -62,8 +62,8 @@ class CenterTracer(object):
         self.car_spd_backward_top = (30.50859806, -18.19230394)
         self.car_spd_forward_btn  = (-19.94236851, 20.00267209)
         self.car_spd_backward_btn = (np.nan, np.nan)
-        self.car_K = 0.65
-        self.plc_info_considered = True
+        self.car_confidence = 0.65      # 基于小车速度计算出来的位移量的置信度
+        self.car_considered = True      # 计算位移量时，是否考虑小车速度信息
 
         # 初始化卡尔曼滤波器
         self.init_kalman()
@@ -85,6 +85,7 @@ class CenterTracer(object):
         self.ellipse_vision = None         # 基于视觉方式得到的内椭圆
         self.ellipse_kalman = None         # 基于卡尔曼滤波得到的内椭圆
         self.coil_ellipse = None           # 经过整形化的带卷内椭圆，主要用于显示
+        self.exp_fit_confidence = 0.75
 
         # 跟踪误差
         self.warning = WarningType.ok
@@ -364,16 +365,10 @@ class CenterTracer(object):
 
     @staticmethod
     def calc_ellipse_diff(ellipse_exp, ellipse):
-        # long_err = math.fabs(ellipse[2] - ellipse_exp[2]) / ellipse_exp[2]
-        # short_err = math.fabs(ellipse[3] - ellipse_exp[3]) / ellipse_exp[3]
-        # angle_err = math.fabs(ellipse[3] - ellipse_exp[3]) / 360.0
-        # total_err = math.sqrt(long_err ** 2 + short_err ** 2 + angle_err ** 2)
-
         # 角度误差的量纲和长度不一样，混合在一起比较麻烦，因此不考虑角度误差
         long_err = (ellipse[2] - ellipse_exp[2]) / ellipse_exp[2]
         short_err = (ellipse[3] - ellipse_exp[3]) / ellipse_exp[3]
         total_err = math.sqrt(long_err**2 + short_err**2)
-
         return total_err
 
     @staticmethod
@@ -447,8 +442,9 @@ class CenterTracer(object):
         elif self.ellipse_exp_fit is None:
             self.ellipse_vision = self.ellipse_fit
         else:
-            self.ellipse_vision = ((self.ellipse_fit + self.ellipse_exp_fit) / 2 + 0.5).astype(np.int32)
-
+            ellipse_vision = self.ellipse_exp_fit * self.exp_fit_confidence + \
+                             self.ellipse_fit * (1.0 - self.exp_fit_confidence)
+            self.ellipse_vision = ellipse_vision.astype(np.int32)
         return self.ellipse_vision
 
     def kalman_filter(self, center, offset):
@@ -465,11 +461,11 @@ class CenterTracer(object):
         ox, oy = self.offset_by_template(frame, lst_center=self.ellipse_kalman)
 
         # 可以读取到PLC状态时，利用小车的当前运动方向修正计算带卷的运动偏移量
-        if plc is not None and self.plc_info_considered:
+        if plc is not None and self.car_considered:
             ox_car, oy_car = self.offset_by_car_movement(ellipse_vision, plc, proc_interval)
             if ox_car != np.nan:
-                ox = ox_car * self.car_K + ox * (1.0 - self.car_K)
-                oy = oy_car * self.car_K + oy * (1.0 - self.car_K)
+                ox = ox_car * self.car_confidence + ox * (1.0 - self.car_confidence)
+                oy = oy_car * self.car_confidence + oy * (1.0 - self.car_confidence)
 
         # kalman filter
         self.ellipse_kalman[0:2] = self.kalman_filter(ellipse_vision, (ox, oy))
@@ -499,6 +495,10 @@ class CenterTracer(object):
         self.proc_interval = time.perf_counter() - self.start_time
         self.start_time = time.perf_counter()
 
+        # 初始状态下，默认为堆料区没有带卷，首先检测是否存在带卷
+        # 发现堆料区有带卷时，则检测带卷的初始位置。如果初始位置处于正常堆料区范围之内，则开始跟踪带卷。
+        # 在跟踪过程中，如果带卷位置超出了正常范围，则告警，并设置跟踪状态为没有带卷，从而重新开始跟踪周期。
+        # 如果上卷结束，设置跟踪状态为没有带卷，从而重新开始跟踪周期。
         if self.tracking_status == TrackingStatus.no_coil:
             if self.coil_exist.analyze_one_frame(frame):
                 self.tracking_status = TrackingStatus.init_position
@@ -506,8 +506,7 @@ class CenterTracer(object):
         elif self.tracking_status == TrackingStatus.init_position:
             self.coil_locator.analyze_one_frame(frame)
             center = self.coil_locator.center
-            # if not self.ellipse_out_of_bound(center):
-            if end_keypoint[0] < center[0] < start_keypoint[0]:
+            if 1800 < center[0] < start_keypoint[0]:   # 当带卷初始位置在堆料区时，初始化带卷跟踪
                 self.init_one_cycle(init_ellipse=(center[0], center[1], 100, 100, 0))
                 self.tracking_status = TrackingStatus.tracking
         else:
