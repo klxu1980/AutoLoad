@@ -22,32 +22,6 @@ SCREEN_WIDTH = 1600
 SHOW_EDGE_IN_TEST = False
 
 
-class VideoPlayer(object):
-    def __init__(self, file_name, ROI=None):
-        self.file_name = file_name
-        self.video = cv2.VideoCapture(file_name)
-        self.ROI = ROI
-
-        self.frame_cnt = int(self.video.get(7))
-        self.cur_frame = 0
-
-    def get_frame(self):
-        self.video.set(cv2.CAP_PROP_POS_FRAMES, self.cur_frame)
-        _, frame = self.video.read()
-        if self.ROI is not None:
-            frame = frame[self.ROI[1]: self.ROI[3], self.ROI[0]: self.ROI[2], :]
-        return frame
-
-    def forward(self):
-        self.cur_frame = min(self.frame_cnt - 1, self.cur_frame + 1)
-
-    def backward(self):
-        self.cur_frame = max(0, self.cur_frame - 1)
-
-    def is_end(self):
-        return self.cur_frame >= self.frame_cnt - 1
-
-
 class LoadStage(Enum):
     WAITING_4_LOADING  = 0,   # 在堆料区等待上料
     MOVING_TO_UNPACKER = 1,   # 向基坑中移动
@@ -66,6 +40,8 @@ class AutoLoader(object):
 
         # 初始化实际控制使用的硬件
         # 如果硬件打开失败，则退出
+        self.plc = None
+        self.camera = None
         if not run_as_demo and not self.__init_hardwares():
             exit(0)
 
@@ -169,6 +145,7 @@ class AutoLoader(object):
                 return None
             else:
                 frame = self.demo_video.get_frame()
+                self.demo_video.forward()
                 return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)     # 从视频中读到的是BGR图像，需要转换为灰度图
         else:
             self.camera.refresh()
@@ -180,7 +157,6 @@ class AutoLoader(object):
         :return: 无
         """
         self.loading_stage = LoadStage.WAITING_4_LOADING
-        self.coil_tracker.restart_tracking()
         self.uploading_start_time = None
         self.video_raw = None
         self.video_proc = None
@@ -203,6 +179,7 @@ class AutoLoader(object):
 
     def control(self):
         self.init_one_cycle()
+        self.coil_tracker.restart_tracking()
         self.proc_start_time = time.perf_counter()
 
         while True:
@@ -226,15 +203,15 @@ class AutoLoader(object):
             self.car_ctrl()
 
             # 显示控制信息和操作按钮
-            frame_bgr = self.show_loading_info(frame=frame_bgr, top=40)
-            frame_bgr = self.show_key_operations(frame_bgr, row_begin=400)
+            self.show_loading_info(frame=frame_bgr, text_top=40)
+            self.show_key_operations(frame_bgr, text_top=400)
 
             # 在现场实测时，一旦开始上卷，同时记录实际控制视频
             if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
                 self.record_proc_video(frame_bgr)
 
             # 记录上卷期间带卷跟踪、PLC的状态
-            if self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
+            if self.csv is not None and self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
                 self.csv.record_tracking(self.coil_tracker)
                 self.csv.record_plc(self.plc)
                 self.csv.write_file()
@@ -254,8 +231,8 @@ class AutoLoader(object):
             else:
                 self.key_operate_demo(key) if self.run_as_demo else self.key_operate_ctrl(key)
 
-    def show_key_operations(self, frame, row_begin):
-        row = row_begin
+    def show_key_operations(self, frame, text_top):
+        row = text_top
         if self.run_as_demo:
             self.show_text(frame, "P(p): pause", (20, row))
             row += 60
@@ -319,6 +296,7 @@ class AutoLoader(object):
         # 因此，判断上卷开始后，开始计时，如果1分钟内还没有结束，则强制进入等待上卷状态
         if self.uploading_start_time is not None and time.perf_counter() - self.uploading_start_time > 60.0:
             self.loading_stage = LoadStage.WAITING_4_LOADING
+            self.coil_tracker.restart_tracking()
 
         # 目前带卷跟踪仅用于监视带卷位置
         if self.loading_stage == LoadStage.WAITING_4_LOADING:
@@ -339,13 +317,14 @@ class AutoLoader(object):
             # 跟踪带卷位置
             # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
             self.coil_tracker.analyze_one_frame(frame, plc)
-            if self.coil_tracker.tracking_status in (TrackingStatus.no_coil, TrackingStatus.init_position):
-                self.loading_stage = LoadStage.WAITING_4_LOADING
-                return
+            # if self.coil_tracker.tracking_status in (TrackingStatus.no_coil, TrackingStatus.init_position):
+            #     self.loading_stage = LoadStage.WAITING_4_LOADING
+            #     return
 
             # 如果带卷位置小于上卷终止位置，则进入下一阶段，检测带卷是否已装入开卷机
-            if self.coil_tracker.coil_ellipse[0] < end_keypoint[0]:
+            if self.coil_tracker.coil_ellipse is not None and self.coil_tracker.coil_ellipse[0] < end_keypoint[0]:
                 self.loading_stage = LoadStage.INTO_UNPACKER
+                self.coil_tracker.restart_tracking()
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
             status = self.coil_pos_status.analyze_one_frame(frame)
             if status:
@@ -380,7 +359,7 @@ class AutoLoader(object):
         cv2.line(frame, stage3_up1, stage3_up2, (20, 20, 255), 2)
         cv2.line(frame, stage3_down1, stage3_down2, (20, 20, 255), 2)
 
-    def show_loading_info(self, frame, top):
+    def show_loading_info(self, frame, text_top):
         # 显示当前时间
         self.show_text(frame, datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S"), (frame.shape[1] - 600, text_top))
 
@@ -397,6 +376,12 @@ class AutoLoader(object):
         if self.camera is not None and self.loading_stage != LoadStage.MOVING_TO_UNPACKER:
             exp_time = self.camera.get_exposure_time()
             self.show_text(frame, "Camera exposure time = %1.1fms" % (exp_time * 0.001), (20, text_top))
+            text_top += 40
+
+        # demo状态下，显示视频总帧数和当前帧
+        if self.run_as_demo:
+            self.show_text(frame, "Video frame count = %d, current frame = %d" %
+                           (self.demo_video.frame_cnt, self.demo_video.cur_frame), (20, text_top))
             text_top += 40
 
         # 显示带卷中心附近图像的直方图
@@ -454,8 +439,9 @@ class AutoLoader(object):
         proc_time = (time.perf_counter() - self.proc_start_time) * 1000
         self.proc_start_time = time.perf_counter()
         self.show_text(frame, "Processing time = %6.2f ms" % proc_time, (20, text_top))
+        text_top += 40
 
-        return frame
+        return text_top
 
     def test_demo(self, video_file_name):
         # 打开视频文件
@@ -467,7 +453,7 @@ class AutoLoader(object):
 
         # 新视频打开后，默认不保存跟踪视频，除非按下'S'键
         self.saving_video = False
-        self.paused = False
+        self.paused = True
 
         self.control()
 
@@ -515,7 +501,7 @@ def demo_test():
         os.chdir("G:\\01 自动上卷视频\\对中视频\\正常")
 
     if mode != "7":
-        for file_name in glob.glob("*.mp4"):
+        for file_name in glob.glob("*.avi"):
             auto_loader.test_demo(file_name)
     else:
         # 再给定目录下枚举所有的带卷视频，记录带卷轨迹
@@ -523,7 +509,7 @@ def demo_test():
         auto_loader.coil_tracker.exp_ellipse = None
         for root, dirs, files in os.walk("E:\\20220521-20220621数据"):
             for _, file in enumerate(files):
-                if os.path.splitext(file)[-1] == ".avi" and "orginal" in os.path.splitext(file)[0]:
+                if os.path.splitext(file)[-1] in (".avi", ".mp4") and "orginal" in os.path.splitext(file)[0]:
                     # 目前保存的视频中，文件名中包含"orginal"的是原始视频
                     # 部分原始视频之前已经分析保存过带卷路径，这些视频将被跳过，不再重复分析
                     if file + ".csv" in files:
@@ -531,19 +517,12 @@ def demo_test():
                     auto_loader.test_demo(video_file_name=root + "\\" + file)
 
 
-def VC_test():
-    cob = combine()
-
-
 def real_control():
     pass
 
-
-
-
 if __name__ == '__main__':
-    # demo_test()
+    demo_test()
 
-    auto_loader = AutoLoader(run_as_demo=False)
-    auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
-    auto_loader.control()
+    # auto_loader = AutoLoader(run_as_demo=False)
+    # auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
+    # auto_loader.control()

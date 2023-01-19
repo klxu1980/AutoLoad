@@ -60,8 +60,11 @@ class CoilLocator(object):
         params = self.coil_net.predict(batch_img)
         center = np.array((params[0][0], params[0][1])) * (self.ROI[2] / 512.0)
         center[0] += self.ROI[0]
-        center[1] += self.ROI[1]
+        center[1] += self.ROI[1] + 100   # y方向定位有错误，暂时这样处理下
         self.center = center.astype(np.int32)
+
+        cv2.circle(frame, (int(params[0][0]), int(params[0][1])), radius=5, color=255, thickness=2)
+        cv2.imshow("", frame)
 
         # 对带卷中心位置进行滤波(第一次直接使用检测结果)
         #self.center = self.center * self.filter_K + center * (1.0 - self.filter_K) if self.proc_times else center

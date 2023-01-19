@@ -71,6 +71,7 @@ class CenterTracer(object):
         # 计时器
         self.start_time = time.perf_counter()
         self.proc_interval = 0.0
+        self.tracking_frame_id = 0         # 跟踪开始后的当前帧号
 
         # 对椭圆进行低通滤波
         self.noise_filter_begin = 1800     # 开始滤波范围，当带卷中心x坐标小于该值时，开始滤波
@@ -153,6 +154,7 @@ class CenterTracer(object):
 
     def restart_tracking(self):
         self.tracking_status = TrackingStatus.no_coil
+        self.tracking_frame_id = 0
 
     def init_one_cycle(self, init_ellipse):
         self.lst_frame = None
@@ -512,6 +514,10 @@ class CenterTracer(object):
         else:
             self.track_coil(frame, plc, self.proc_interval)
 
+            self.tracking_frame_id += 1
+            if self.tracking_frame_id > 5 and self.ellipse_out_of_bound(self.coil_ellipse):
+                self.restart_tracking()
+
     @staticmethod
     def calc_supposed_y(begin, end, x):
         k = (end[1] - begin[1]) / (end[0] - begin[0])
@@ -549,11 +555,6 @@ class CenterTracer(object):
         """
         评估跟踪质量
         """
-        # 检查绝对位置是否超限
-        if self.ellipse_out_of_bound(ellipse):
-            self.restart_tracking()
-            return
-
         # 如果预期椭圆数据存在，则检查拟合所得椭圆和卷积所得椭圆与其的形态差异
         if self.ellipse_exp is None:
             self.err_ellipse = np.nan

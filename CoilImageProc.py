@@ -10,6 +10,32 @@ from FilePath import PYTHON_PATH
 edge_detector = cv2.ximgproc.createStructuredEdgeDetection(PYTHON_PATH + "model.yml.gz")
 
 
+class VideoPlayer(object):
+    def __init__(self, file_name, ROI=None):
+        self.file_name = file_name
+        self.video = cv2.VideoCapture(file_name)
+        self.ROI = ROI
+
+        self.frame_cnt = int(self.video.get(7))
+        self.cur_frame = 0
+
+    def get_frame(self):
+        self.video.set(cv2.CAP_PROP_POS_FRAMES, self.cur_frame)
+        _, frame = self.video.read()
+        if self.ROI is not None:
+            frame = frame[self.ROI[1]: self.ROI[3], self.ROI[0]: self.ROI[2], :]
+        return frame
+
+    def forward(self):
+        self.cur_frame = min(self.frame_cnt - 1, self.cur_frame + 1)
+
+    def backward(self):
+        self.cur_frame = max(0, self.cur_frame - 1)
+
+    def is_end(self):
+        return self.cur_frame >= self.frame_cnt - 1
+
+
 def cv_read(file_name, gray=False):
     img = cv2.imdecode(np.fromfile(file_name, dtype=np.uint8), -1)
     if gray and len(img.shape) > 2:
@@ -175,8 +201,9 @@ def draw_histogram(hist):
     img = np.zeros((100, 256), dtype=np.uint8)
     if hist is not None:
         for i, h in enumerate(hist):
-            v = int(h * 100)
-            img[100 - v: 100, i] = 255
+            if not np.isnan(h):
+                v = int(h * 100)
+                img[100 - v: 100, i] = 255
     return img
 
 
