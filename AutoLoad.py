@@ -40,7 +40,7 @@ class AutoLoader(object):
 
         # 初始化实际控制使用的硬件
         # 如果硬件打开失败，则退出
-        self.plc = None
+        self.plc = PLCComm()
         self.camera = None
         if not run_as_demo and not self.__init_hardwares():
             exit(0)
@@ -85,7 +85,6 @@ class AutoLoader(object):
 
     def __init_hardwares(self):
         # 与PLC的TCP通信
-        self.plc = PLCComm()
         if not self.plc.connect():
             return False
 
@@ -195,7 +194,7 @@ class AutoLoader(object):
                 self.record_raw_video(frame_bgr)
 
             # 更新PLC状态
-            if self.plc is not None:
+            if self.plc.connected:
                 self.plc.refresh_status()
 
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
@@ -203,8 +202,9 @@ class AutoLoader(object):
             self.car_ctrl()
 
             # 显示控制信息和操作按钮
-            self.show_loading_info(frame=frame_bgr, text_top=40)
-            self.show_key_operations(frame_bgr, text_top=400)
+            text_top = self.show_old_loading_info(frame=frame_bgr, text_top=20)
+            self.show_loading_info(frame=frame_bgr, text_top=text_top)
+            self.show_key_operations(frame_bgr, text_top=text_top + 400)
 
             # 在现场实测时，一旦开始上卷，同时记录实际控制视频
             if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
@@ -364,8 +364,8 @@ class AutoLoader(object):
         self.show_text(frame, datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S"), (frame.shape[1] - 600, text_top))
 
         # 显示PLC状态信息
-        text_top = 40
-        if self.plc is not None:
+        text_top += 40
+        if self.plc.connected:
             plc_str = "PLC heartbeat: %d, car moving up: %d, down: %d, forward: %d, backward: %d. Support opened: %d" % \
                       (self.plc.heartbeat, self.plc.car_up, self.plc.car_down, self.plc.car_forward,
                        self.plc.car_backward, self.plc.support_open)
@@ -442,6 +442,53 @@ class AutoLoader(object):
         text_top += 40
 
         return text_top
+
+    def show_old_loading_info(self, frame, text_top):
+        self.show_text(frame, "Mode0:", (10, text_top + 40), (20, 255, 255))
+        self.show_text(frame, "Rbt :", (10, text_top + 90), (20, 255, 255))
+        self.show_text(frame, "%", (240, text_top + 90), (20, 255, 255))
+
+        # 小车行动命令
+        self.show_text(frame, "In  : %d" % self.plc.car_forward , (10, text_top + 140), (20, 255, 255))
+        self.show_text(frame, "Out : %d" % self.plc.car_backward, (10, text_top + 190), (20, 255, 255))
+        self.show_text(frame, "Up  : %d" % self.plc.car_up,       (10, text_top + 240), (20, 255, 255))
+        self.show_text(frame, "Down: %d" % self.plc.car_down,     (10, text_top + 290), (20, 255, 255))
+
+        # 卷筒状态: 1：涨径; 0：缩径
+        self.show_text(frame, "Expand: %d" % self.plc.PayoffCoilBlock_Expand, (300, text_top + 40), (20, 255, 255))
+
+        # 压辊状态: 1：压下; 0：抬起
+        self.show_text(frame, "jamroll: %d" % self.plc.JammingRoll_State, (300, text_top + 90), (20, 255, 255))
+
+        # 支撑状态: 1：打开; 0：关闭
+        self.show_text(frame, "support: %d" % self.plc.PayoffSupport_Open, (300, text_top + 140), (20, 255, 255))
+
+        # 导板状态: 1：抬起; 0：放下
+        self.show_text(frame, "board  : %d" % self.plc.GuideBoard_Up, (300, text_top + 190), (20, 255, 255))
+
+        # 卷筒旋转: 1：正转; 2：反转; 0：不动
+        if self.plc.Payoff_PositiveRun:
+            self.show_text(frame, "block  : 1", (300, text_top + 240), (20, 255, 255))
+        elif self.plc.Payoff_NegativeRun:
+            self.show_text(frame, "block  : 2", (300, text_top + 240), (20, 255, 255))
+        else:
+            self.show_text(frame, "block  : 0", (300, text_top + 240), (20, 255, 255))
+
+        # 导板伸缩: 1：伸出; 0：缩回
+        self.show_text(frame, "tongue : %d" % self.plc.GuideBoard_Extend, (300, text_top + 290), (20, 255, 255))
+
+        # 内径圆圆心坐标
+        ellipse = self.coil_tracker.coil_ellipse
+        if ellipse is not None:
+            self.show_text(frame, "x: %d" % ellipse[0], (10, text_top + 360), (20, 255, 255))
+            self.show_text(frame, "y: %d" % ellipse[1], (300, text_top + 360), (20, 255, 255))
+            """
+            # 模糊度百分比
+            self.show_text(frame, to_string(D.definition_rate), (2900, 1970), (20, 255, 255))
+            self.show_text(frame, "%", (3000, 1970), (20, 255, 255))
+            """
+
+        return text_top + 360 + 40
 
     def test_demo(self, video_file_name):
         # 打开视频文件

@@ -75,6 +75,7 @@ class PLCComm(object):
 
         # TCP
         self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connected = False
 
     def __init_plc_variables(self):
         # 从PLC中读取到的状态
@@ -192,6 +193,7 @@ class PLCComm(object):
             return False
 
         print("连接PLC成功")
+        self.connected = True
         return True
 
     def send_read_command(self):
