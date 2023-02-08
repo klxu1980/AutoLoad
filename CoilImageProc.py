@@ -159,11 +159,15 @@ def fit_ellipse(image, threshold):
     xy = np.array(list(zip(xy[1], xy[0])))
     try:
         reg = LsqEllipse().fit(xy)
+        center, long, short, phi = reg.as_parameters()
+        phi *= 180.0 / math.pi
     except:
         return None
 
-    center, long, short, phi = reg.as_parameters()
-    phi *= 180.0 / math.pi
+    # 检查长短轴是否正确
+    if long <= 0 or short <= 0:
+        print("Fitting ellipse error, long = %1.3f, short = %1.3f" % (long, short))
+        return None
 
     # 调整长短轴
     if long < short:

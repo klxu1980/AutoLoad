@@ -201,6 +201,12 @@ class AutoLoader(object):
             self.track_one_frame(frame=frame_gray, plc=self.plc)
             self.car_ctrl()
 
+            # 向PLC写运行状态
+            if self.coil_tracker.coil_ellipse is not None:
+                self.plc.inner_ellipse = self.coil_tracker.coil_ellipse
+            if self.plc.connected:
+                self.plc.send_order()
+
             # 显示控制信息和操作按钮
             text_top = self.show_old_loading_info(frame=frame_bgr, text_top=20)
             self.show_loading_info(frame=frame_bgr, text_top=text_top)
@@ -335,6 +341,9 @@ class AutoLoader(object):
                 self.loading_stage = LoadStage.WAITING_4_LOADING
 
     def car_ctrl(self):
+        pass
+
+    def write_plc(self):
         pass
 
     def draw_lines(self, frame):
