@@ -497,6 +497,14 @@ class CenterTracer(object):
         self.proc_interval = time.perf_counter() - self.start_time
         self.start_time = time.perf_counter()
 
+        self.coil_locator.analyze_one_frame(frame)
+        center = self.coil_locator.center
+        self.coil_ellipse = (center[0], center[1], 100, 100, 0)
+        cv2.circle(frame, center, radius=5, color=255, thickness=2)
+        cv2.imshow("", frame)
+
+        return
+
         # 初始状态下，默认为堆料区没有带卷，首先检测是否存在带卷
         # 发现堆料区有带卷时，则检测带卷的初始位置。如果初始位置处于正常堆料区范围之内，则开始跟踪带卷。
         # 在跟踪过程中，如果带卷位置超出了正常范围，则告警，并设置跟踪状态为没有带卷，从而重新开始跟踪周期。

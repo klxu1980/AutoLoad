@@ -17,7 +17,7 @@ class LabelType():
 
 
 class ImageSet:
-    def __init__(self, dir, output_size, img_size):
+    def __init__(self, output_size, img_size):
         self.raw_images = None
         self.norm_images = None
         self.img_size = img_size
@@ -25,9 +25,12 @@ class ImageSet:
         self.batch_size = 1000
         self.reload_interval = 500
         self.read_times = 0
-        self.random_noise = True
-
+        self.random_noise = False
+        self.edge_img = False
         self.file_list = list()
+
+    def load(self, dir):
+        self.file_list.clear()
         for file_name in glob.glob(dir + "\\*.jpg"):
             self.file_list.append(file_name)
         print(("There are %d images in " % len(self.file_list)) + dir)
@@ -51,6 +54,9 @@ class ImageSet:
         # load image from file and resize it
         src = cv_read(file_name, gray=True)
         img = cv2.resize(src, (self.img_size, self.img_size))
+        if self.edge_img:
+            img = edge_image(img)
+
         resize_k = src.shape[0] / self.img_size
 
         # extract label from file name
@@ -181,6 +187,26 @@ class ImageSet:
             cv2.imshow("", img)
             if cv2.waitKey(0) & 0xff == ord('q'):  # 按q退出
                 break
+
+    def enum_images(self):
+        for _, file in enumerate(self.file_list):
+            img, norm_img, label, norm_label = self.read_labeled_image(file)
+            cv2.circle(img, (label[0], label[1]), 5, (0, 255, 0), 1)
+            cv2.imshow("", img)
+            cv2.waitKey(0)
+
+    def random_subset(self, sample_ration, remove=False):
+        new_set = ImageSet(output_size=self.output_size, img_size=self.img_size)
+        sample_list = random.sample(range(0, len(self.file_list)), int(len(self.file_list) * sample_ration) )
+        for _, i in enumerate(sample_list):
+            new_set.file_list.append(self.file_list[i])
+
+        if remove:
+            for _, i in enumerate(sample_list):
+                self.file_list[i] = ""
+            self.file_list = list(filter(lambda x: x != "", self.file_list))
+
+        return new_set
 
 
 if __name__ == '__main__':

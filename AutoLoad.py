@@ -71,7 +71,7 @@ class AutoLoader(object):
         self.coil_tracker = CenterTracer()
         self.coil_tracker.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
         self.coil_tracker.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
-        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-01-14-11-44.pt")    # 鞍座检测器，判断带卷是否在鞍座上
+        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-02-10-19-37.pt")    # 鞍座检测器，判断带卷是否在鞍座上
 
         # 上卷检测器
         self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
@@ -231,7 +231,7 @@ class AutoLoader(object):
             key = cv2.waitKeyEx(0 if self.paused else 10)
             if key == ord('R') or key == ord('r'):
                 cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
-                cv2.imwrite(self.datetime_string() + "-original.jpg", frame_gray)
+                cv2.imwrite("E:\\" + self.datetime_string() + "-original.jpg", frame_gray)
             elif key == ord('q') or key == ord('Q'):
                 break
             else:

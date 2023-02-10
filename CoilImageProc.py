@@ -55,7 +55,7 @@ def color_image(image):
     return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
 
-def edge_image_old(image):
+def edge_image(image):
     # For some unknown reason a grayed image will cause error in detectEdges(),
     # so a grayed image need be transformed to a colored image.
     if len(image.shape) == 2:
@@ -65,19 +65,6 @@ def edge_image_old(image):
     max_value = np.max(edge)
     edge_img = (edge * 255 / max_value).astype(np.uint8)
     return edge_img
-
-
-def edge_image(image):
-    raw_img = image.copy()
-    edge1 = edge_image_old(raw_img)
-
-    # image = cv2.equalizeHist(image)
-    # edge2 = edge_image_old(image)
-    #
-    # img = np.hstack((edge1, edge2))
-    # cv2.imshow("", img)
-
-    return edge1
 
 
 def norm_image(image):

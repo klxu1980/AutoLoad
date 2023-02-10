@@ -4,81 +4,89 @@ import datetime
 import numpy as np
 import cv2
 import struct
+import csv
+import threading
 from HKCamera import HKCamera
 
 PLC_IP = "8.8.8.140"
 PLC_PORT = 102
 
 
-class PLCComm(object):
+class PLCComm(threading.Thread):
     def __init__(self):
-        buf_write = [0x03, 0x00,    # 帧头
-                     0x00, 0x5F,    # 数组总长度（95 bytes）
+        threading.Thread.__init__(self)
+        self.lock = threading.RLock()
+        self.terminated = False
+        self.__tcp = None
+        self.connected = False
+        self.__lst_send_time = datetime.datetime.now()
+        self.__csv = None
+
+        # 初始化变量
+        self.__init_read_write_buffer()
+        self.__init_plc_variables()
+
+    def __init_read_write_buffer(self):
+        buf_write = [0x03, 0x00,  # 帧头
+                     0x00, 0x5F,  # 数组总长度（95 bytes）
                      0x02, 0xF0, 0x80, 0x32, 0x01, 0x00, 0x00, 0x00, 0x26, 0x00, 0x0E,
-                     0x00, 0x40,    # 数据字节的总长度 + 4(即60 + 4 = 64)
+                     0x00, 0x40,  # 数据字节的总长度 + 4(即60 + 4 = 64)
                      0x05, 0x01, 0x12, 0x0A, 0x10, 0x02,
-                     0x00, 0x3C,    # 数据的总字节数（即60个字节）
-                     0x20, 0x12,    # DB号: 2012是DB8210
+                     0x00, 0x3C,  # 数据的总字节数（即60个字节）
+                     0x20, 0x12,  # DB号: 2012是DB8210
                      0x84, 0x00,
-                     0x00, 0xF0,    # 偏移起始位（F0(H) - 240(D) / 8 = 30.0）
+                     0x00, 0xF0,  # 偏移起始位（F0(H) - 240(D) / 8 = 30.0）
                      0x00, 0x04,
-                     0x01, 0xE0,    # 偏移量终止位（即60.0）
+                     0x01, 0xE0,  # 偏移量终止位（即60.0）
 
                      # 左相机数据
-                     0x00, 0x00,    # data[35], data[36]  byte30.0
-                     0x00, 0x00,    # data[37], data[38]  byte32.0
-                     0x00, 0x00,    # data[39], data[40]  byte34
-                     0x00, 0x00,    # data[41], data[42]  byte36
-                     0x00, 0x00,    # data[43], data[44]  byte38
-                     0x00, 0x00,    # data[45], data[46]  byte40
-                     0x00, 0x00,    # data[47], data[48]  byte42
-                     0x00, 0x00,    # data[49], data[50]  byte44
-                     0x00, 0x00,    # data[51], data[52]  byte46
-                     0x00, 0x00,    # data[53], data[54]  byte48
-                     0x00, 0x00,    # data[55], data[56]  byte50
-                     0x00, 0x00,    # data[55], data[56]  byte52
-                     0x00, 0x00,    # data[55], data[56]  byte54
-                     0x00, 0x00,    # data[55], data[56]  byte56
-                     0x00, 0x00,    # data[55], data[56]  byte58
+                     0x00, 0x00,  # data[35], data[36]  byte30.0
+                     0x00, 0x00,  # data[37], data[38]  byte32.0
+                     0x00, 0x00,  # data[39], data[40]  byte34
+                     0x00, 0x00,  # data[41], data[42]  byte36
+                     0x00, 0x00,  # data[43], data[44]  byte38
+                     0x00, 0x00,  # data[45], data[46]  byte40
+                     0x00, 0x00,  # data[47], data[48]  byte42
+                     0x00, 0x00,  # data[49], data[50]  byte44
+                     0x00, 0x00,  # data[51], data[52]  byte46
+                     0x00, 0x00,  # data[53], data[54]  byte48
+                     0x00, 0x00,  # data[55], data[56]  byte50
+                     0x00, 0x00,  # data[55], data[56]  byte52
+                     0x00, 0x00,  # data[55], data[56]  byte54
+                     0x00, 0x00,  # data[55], data[56]  byte56
+                     0x00, 0x00,  # data[55], data[56]  byte58
 
                      # 右相机数据
-                     0xFF, 0xFF,   # data[57], data[58]  byte60.0
-                     0x00, 0x00,   # data[59], data[60]  byte62.0
-                     0x00, 0x00,   # data[61], data[62]  byte64
-                     0x00, 0x00,   # data[63], data[64]  byte66
-                     0x00, 0x00,   # data[65], data[66]  byte68
-                     0x00, 0x00, # data[67], data[68]  byte70
-                     0x00, 0x00, # data[69], data[70]  byte72
-                     0x00, 0x00, # data[71], data[72]  byte74
-                     0x00, 0x00, # data[73], data[74]  byte76
-                     0x00, 0x00, # data[75], data[76]  byte78
-                     0x00, 0x00, # data[77], data[78]  byte80
-                     0x00, 0x00, # data[79], data[80]  byte82
-                     0x00, 0x00, # data[81], data[82]  byte84
-                     0x00, 0x00, # data[83], data[84]  byte86
-                     0x00, 0x00, # data[85], data[86]  byte88
+                     0xFF, 0xFF,  # data[57], data[58]  byte60.0
+                     0x00, 0x00,  # data[59], data[60]  byte62.0
+                     0x00, 0x00,  # data[61], data[62]  byte64
+                     0x00, 0x00,  # data[63], data[64]  byte66
+                     0x00, 0x00,  # data[65], data[66]  byte68
+                     0x00, 0x00,  # data[67], data[68]  byte70
+                     0x00, 0x00,  # data[69], data[70]  byte72
+                     0x00, 0x00,  # data[71], data[72]  byte74
+                     0x00, 0x00,  # data[73], data[74]  byte76
+                     0x00, 0x00,  # data[75], data[76]  byte78
+                     0x00, 0x00,  # data[77], data[78]  byte80
+                     0x00, 0x00,  # data[79], data[80]  byte82
+                     0x00, 0x00,  # data[81], data[82]  byte84
+                     0x00, 0x00,  # data[83], data[84]  byte86
+                     0x00, 0x00,  # data[85], data[86]  byte88
                      ]
-        self.buf_write = np.array(buf_write, dtype=np.uint8)
+        self.__buf_write = np.array(buf_write, dtype=np.uint8)
 
         read_data_key = [0x03, 0x00,
                          0x00, 0x1F,
                          0x02, 0xF0, 0x80, 0x32, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x0E,
                          0x00, 0x00,
                          0x04, 0x01, 0x12, 0x0A, 0x10, 0x02,
-                         0x00, 0x1E, # 取得数据块的长度, 001E对应30个字节char
-                         0x20, 0x12, # 数据块的地址, 2012对应DB8210
+                         0x00, 0x1E,  # 取得数据块的长度, 001E对应30个字节char
+                         0x20, 0x12,  # 数据块的地址, 2012对应DB8210
                          0x84, 0x00,
-                         0x00, 0x00, # 起始位
+                         0x00, 0x00,  # 起始位
                          ]
-        self.read_data_key = np.array(read_data_key, dtype=np.uint8)
-
-        self.buf_read = None
-        self.__init_plc_variables()
-
-        # TCP
-        self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.connected = False
-        self.lst_send_time = datetime.datetime.now()
+        self.__read_data_key = np.array(read_data_key, dtype=np.uint8)
+        self.__buf_read = None
 
     def __init_plc_variables(self):
         # 从PLC中读取到的状态
@@ -133,37 +141,38 @@ class PLCComm(object):
     def __send_tcp(self, order):
         # 频繁向PLC写会造成端口被关闭
         # 检查两次写指令的时间间隔，如果小于10ms，则等待10ms
-        interval = (datetime.datetime.now() - self.lst_send_time).microseconds
-        self.lst_send_time = datetime.datetime.now()
-        if interval < 15000:
-            time.sleep(0.02)
+        # interval = (datetime.datetime.now() - self.__lst_send_time).microseconds
+        # self.__lst_send_time = datetime.datetime.now()
+        # if interval < 15000:
+        #     time.sleep(0.02)
+        # time.sleep(0.1)
 
         try:
-            byte_cnt = self.tcp.send(order)
+            byte_cnt = self.__tcp.send(order)
             if byte_cnt != len(order):
-                print("向PLC发送数据量不足")
+                print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + "向PLC发送数据量不足")
                 return False
         except socket.timeout:
-            print("向PLC发送数据超时")
+            print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + "向PLC发送数据超时")
             return False
-        except socket.error:
-            print("向PLC发送数据出现错误")
+        except socket.error as e:
+            print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + str(e))
             return False
         return True
 
     def __read_tcp(self, bytes_cnt):
         try:
-            rcved = self.tcp.recv(bytes_cnt)
+            rcved = self.__tcp.recv(bytes_cnt)
             if len(rcved) < bytes_cnt:
-                print("接收PLC数据量不足，要求%d字节，收到%d字节" % (bytes_cnt, len(rcved)))
+                print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + "接收PLC数据量不足，要求%d字节，收到%d字节" % (bytes_cnt, len(rcved)))
                 return None
             else:
                 return rcved
         except socket.timeout:
-            print("接收PLC数据超时")
+            print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + "接收PLC数据超时")
             return None
-        except socket.error:
-            print("接收PLC数据错误")
+        except socket.error as e:
+            print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + str(e))
             return None
 
     def connect(self):
@@ -178,16 +187,24 @@ class PLCComm(object):
         datatest2 = np.array(datatest2, dtype=np.uint8)
 
         # 创建用于通信的socket
-        print("正在连接PLC...")
+        # 有时候服务器端会中断连接，需要关闭并重新建立连接
+        if self.__tcp is not None:
+            self.__tcp.shutdown(socket.SHUT_RDWR)
+            self.__tcp.close()
+            time.sleep(0.5)
+        self.__tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connected = False
+
+        print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + "正在连接PLC...")
         try:
-            self.tcp.connect((PLC_IP, PLC_PORT))
+            self.__tcp.connect((PLC_IP, PLC_PORT))
         except socket.timeout:
             print("连接PLC端口超时")
             return False
-        except socket.error:
-            print("连接PLC端口错误")
+        except socket.error as e:
+            print(e)
             return False
-        self.tcp.settimeout(0.5)
+        self.__tcp.settimeout(0.5)
         print("连接到PLC端口")
 
         # 向PLC发送密钥1
@@ -206,8 +223,11 @@ class PLCComm(object):
         self.connected = True
         return True
 
+    def close(self):
+        self.terminated = True
+
     def __send_read_command(self):
-        if not self.__send_tcp(self.read_data_key):
+        if not self.__send_tcp(self.__read_data_key):
             print("读PLC数据命令发送失败")
             return False
         else:
@@ -219,42 +239,103 @@ class PLCComm(object):
             print("接收PLC数据失败")
             return False
         else:
-            self.buf_read = rcved
+            self.__buf_read = rcved
             return True
 
     def __read_uchar(self, id):
-        return self.buf_read[25 + id]
+        return self.__buf_read[25 + id]
 
     def __read_short(self, id):
-        return (self.buf_read[25 + id] << 8) | self.buf_read[26 + id]
+        return (self.__buf_read[25 + id] << 8) | self.__buf_read[26 + id]
 
     def __read_float(self, id):
-        return struct.unpack("!f", (self.buf_read[25 + id],
-                                    self.buf_read[26 + id],
-                                    self.buf_read[27 + id],
-                                    self.buf_read[28 + id]))[0]
+        return struct.unpack("!f", (self.__buf_read[25 + id],
+                                    self.__buf_read[26 + id],
+                                    self.__buf_read[27 + id],
+                                    self.__buf_read[28 + id]))[0]
 
     def __read_bool(self, id, bit):
-        return int((self.buf_read[25 + id] >> bit) & 0x01)
+        return int((self.__buf_read[25 + id] >> bit) & 0x01)
 
     def __write_short(self, id, value):
-        self.buf_write[35 + id] = value >> 8
-        self.buf_write[36 + id] = value
+        self.__buf_write[35 + id] = (value >> 8) & 0x0FF
+        self.__buf_write[36 + id] = value & 0x0FF
 
     def __write_float(self, id, value):
         # 高位在前，低位在后
         bytes = struct.pack("f", value)
-        self.buf_write[35 + id] = bytes[3]
-        self.buf_write[36 + id] = bytes[2]
-        self.buf_write[37 + id] = bytes[1]
-        self.buf_write[38 + id] = bytes[0]
+        self.__buf_write[35 + id] = bytes[3]
+        self.__buf_write[36 + id] = bytes[2]
+        self.__buf_write[37 + id] = bytes[1]
+        self.__buf_write[38 + id] = bytes[0]
 
     def __write_bool(self, id, bit, value):
         mask = 0x01 << bit
         if value:
-            self.buf_write[35 + id] |= mask
+            self.__buf_write[35 + id] |= mask
         else:
-            self.buf_write[35 + id] &= ~mask
+            self.__buf_write[35 + id] &= ~mask
+
+    def new_csv_record(self, path):
+        csv_file = open(path + "\\csvdata.csv", "w", newline='')
+        self.__csv = csv.writer(csv_file)
+
+        row = ["年", "月", "日", "时", "分", "秒", "毫秒",
+               "PLC心跳", "点动上", "点动下", "点动进", "点动退",
+               "支撑开", "锁定目标", "命令进", "命令退", "命令上", "命令下",
+               "椭圆x", "椭圆y", "椭圆h", "椭圆w", "椭圆倾角", "通讯心跳", "图像心跳", "追踪阶段",
+               "平移剩余距离", "下降剩余距离", "Rbt报警", "Pst报警", "椭圆追踪模式", "上卷检测模式",
+               "开卷检测模式", "上卷状态", "开卷状态", "导板升", "导板降", "导板伸", "导板缩", "卷筒胀径",
+               "压辊压下", "卷筒正转", "卷筒反转", "程序关支撑", "程序开支撑"]
+        self.__csv.writerow(row)
+
+    def add_csv_record(self):
+        if self.__csv is None:
+            return
+        now = datetime.datetime.now()
+        row = [str(now.year), str(now.month), str(now.day),
+               str(now.hour), str(now.minute), str(now.second), str(now.microsecond),
+               str(self.heartbeat),
+               str(self.car_up), str(self.car_down), str(self.car_forward), str(self.car_backward),
+               str(self.support_open),
+               str(self.g_get_target_flag),
+               str(self.order_car_forward),
+               str(self.order_car_backward),
+               str(self.order_car_up),
+               str(self.order_car_down),
+               str(self.inner_ellipse[0]),
+               str(self.inner_ellipse[1]),
+               str(self.inner_ellipse[2]),
+               str(self.inner_ellipse[3]),
+               str(self.inner_ellipse[4]),
+               str(self.thread1_heart),
+               str(self.thread2_heart),
+               str(self.movement_stage),
+               str(self.surplus_horz),
+               str(self.surplus_vert),
+               str(self.g_AccErr),
+               str(self.g_PstErr),
+               str(self.ellipse_track_mode),
+               str(self.load_detect_mode),
+               str(self.open_detect_mode),
+               str(self.coilload_state),
+               str(self.coilopen_state),
+               str(self.GuideBoard_Up),
+               str(self.GuideBoard_Down),
+               str(self.GuideBoard_Extend),
+               str(self.GuideBoard_Shrink),
+               str(self.PayoffCoilBlock_Expand),
+               str(self.JammingRoll_State),
+               str(self.Payoff_PositiveRun),
+               str(self.Payoff_NegativeRun),
+               str(self.PayoffSupport_Close),
+               str(self.PayoffSupport_Open)]
+        self.__csv.writerow(row)
+
+    def copy_coil_ellipse(self, ellipse):
+        self.lock.acquire()
+        self.inner_ellipse = ellipse
+        self.lock.release()
 
     def refresh_status(self):
         """
@@ -274,6 +355,8 @@ class PLCComm(object):
             return False
 
     def send_order(self):
+        self.lock.acquire()
+
         self.thread1_heart += 1
         self.thread2_heart += 1
         if self.thread1_heart > 5000:
@@ -320,11 +403,26 @@ class PLCComm(object):
         self.__write_bool(58, 6, self.g_AccErr)                       # 数据地址88.6，可信度较低报警，当可信度低于70时，该标志位置1
         self.__write_bool(58, 7, self.g_PstErr)                       # 数据地址88.7，钢卷位置越界报警，越界时该标志位置1
 
-        return self.__send_tcp(self.buf_write)
+        self.lock.release()
+
+        return self.__send_tcp(self.__buf_write)
+
+    def run(self):
+        self.connect()
+        while not self.terminated:
+            time.sleep(0.05)
+            self.refresh_status()
+            time.sleep(0.05)
+            if not self.send_order():
+                self.connect()
 
 
 if __name__ == '__main__':
     plc = PLCComm()
+    plc.start()
+
+
+    """
     camera = HKCamera()
     SCREEN_WIDTH = 1400
 
@@ -353,3 +451,4 @@ if __name__ == '__main__':
                 plc.order_car_backward = True
             elif key == ord('q'):
                 break
+    """
