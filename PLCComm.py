@@ -13,8 +13,9 @@ PLC_PORT = 102
 
 
 class PLCComm(threading.Thread):
-    def __init__(self):
+    def __init__(self, run_as_demo=False):
         threading.Thread.__init__(self)
+        self.run_as_demo = run_as_demo
         self.lock = threading.RLock()
         self.terminated = False
         self.__tcp = None
@@ -225,6 +226,7 @@ class PLCComm(threading.Thread):
 
     def close(self):
         self.terminated = True
+        self.join()
 
     def __send_read_command(self):
         if not self.__send_tcp(self.__read_data_key):
@@ -408,13 +410,17 @@ class PLCComm(threading.Thread):
         return self.__send_tcp(self.__buf_write)
 
     def run(self):
-        self.connect()
-        while not self.terminated:
-            time.sleep(0.05)
-            self.refresh_status()
-            time.sleep(0.05)
-            if not self.send_order():
-                self.connect()
+        if self.run_as_demo:
+            while not self.terminated:
+                time.sleep(0.02)
+        else:
+            self.connect()
+            while not self.terminated:
+                time.sleep(0.1)
+                self.refresh_status()
+                time.sleep(0.1)
+                if not self.send_order():
+                    self.connect()
 
 
 if __name__ == '__main__':

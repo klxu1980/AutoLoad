@@ -17,6 +17,7 @@ filterpy需要单独安装，执行指令"pip install filterpy"
 VC调用filterpy时，有可能会出现"DLL load failed while importing _arpack"错误。该错误通常是scipy的版本兼容性问题引起的。
 可以先删除，再安装scipy。具体方法为：在anaconda prompt下面，执行pip uninstall scipy，再执行pip install scipy。
 """
+SHOW_FITTING_ELLIPSE = False
 
 
 class WarningType(Enum):
@@ -26,9 +27,9 @@ class WarningType(Enum):
 
 
 class TrackingStatus(Enum):
-    no_coil       = 0,         # 没有检测到带卷
-    init_position = 1,         # 正在搜索带卷初始位置
-    tracking      = 2          # 正在跟踪
+    NO_COIL  = 0,         # 没有检测到带卷
+    LOCATING = 1,         # 正在搜索带卷初始位置
+    TRACKING = 2          # 正在跟踪
 
 
 class CenterTracer(object):
@@ -36,7 +37,7 @@ class CenterTracer(object):
         self.WINDOW_SIZE = 512
 
         self.output_size = LabelType.InnerOnly
-        self.coil_net = self.init_network(self.WINDOW_SIZE, self.output_size)
+        self.coil_net = self.__init_network(self.WINDOW_SIZE, self.output_size)
         self.coil_net.init_model()
 
         # 使用CNN确定中心位置时，在初始位置附近，随机产生一系列窗口，对窗口中的图像检测中心，然后求平均
@@ -66,7 +67,7 @@ class CenterTracer(object):
         self.car_considered = True      # 计算位移量时，是否考虑小车速度信息
 
         # 初始化卡尔曼滤波器
-        self.init_kalman()
+        self.__init_kalman()
 
         # 计时器
         self.start_time = time.perf_counter()
@@ -95,17 +96,17 @@ class CenterTracer(object):
         self.err_cnn_vs_fit = -1         # cnn椭圆与拟合椭圆比值
         self.err_ellipse    = -1         # 最终椭圆检测结果误差
         self.err_movement   = -1
+        self.coil_outof_route = False    # 带卷跟踪超出合理范围
 
         # 带卷跟踪状态
-        self.tracking_status = TrackingStatus.no_coil
+        self.tracking_status = TrackingStatus.NO_COIL
 
         # 显示轨迹跟踪
-        self.show_fitting = True           # 显示椭圆拟合
         self.kalman_trace = list()          # 经过卡尔曼滤波后的轨迹
         self.vision_trace = list()          # 单纯由视觉产生的轨迹
 
     @staticmethod
-    def init_network(image_size, output_size):
+    def __init_network(image_size, output_size):
         network = CoilNet(img_size=image_size, output_size=output_size)
         network.add_conv_layer(channels=8, kernel_size=3, padding=1, pool_size=2)
         network.add_conv_layer(channels=16, kernel_size=3, padding=1, pool_size=2)
@@ -118,7 +119,7 @@ class CenterTracer(object):
 
         return network
 
-    def init_kalman(self):
+    def __init_kalman(self):
         self.kalman = KalmanFilter(dim_x=4, dim_z=4)
         self.kalman.F = np.array([[1.0, 1.0, 0.0, 0.0],
                                   [0.0, 1.0, 0.0, 0.0],
@@ -136,27 +137,7 @@ class CenterTracer(object):
         self.kalman.Q[0:2, 0:2] = Q
         self.kalman.Q[2:4, 2:4] = Q
 
-    def read_trace_stat(self, file_name):
-        trace_stat = {}
-        csv_reader = csv.reader(open(file_name, 'r'))
-        for line in csv_reader:
-            center = (int(float(line[0])), int(float(line[1])))  # 椭圆中心位置
-            values = (int(float(line[2]) + 0.5), int(float(line[3]) + 0.5), int(float(line[4]) + 0.5))
-            trace_stat[center] = values
-        self.exp_ellipse = trace_stat
-
-    def load_model(self, model_file):
-        self.coil_net.load_model(model_file)
-
-    @staticmethod
-    def pre_process_image(image):
-        return edge_image(image)
-
-    def restart_tracking(self):
-        self.tracking_status = TrackingStatus.no_coil
-        self.tracking_frame_id = 0
-
-    def init_one_cycle(self, init_ellipse):
+    def __init_one_cycle(self, init_ellipse):
         self.lst_frame = None
         self.ellipse_kalman = np.array(init_ellipse).astype(np.float32)
         self.start_time = time.perf_counter()
@@ -167,11 +148,11 @@ class CenterTracer(object):
 
         self.kalman.x = np.array([init_ellipse[0], 0, init_ellipse[1], 0])
 
-    def center_by_net(self, frame, img_size, init_center):
+    def __center_by_net(self, frame, img_size, init_center):
         # 预先提取图像边缘以提高精度
         # 为了减小计算耗时，仅对目标附近的区域进行边缘提取
         proc_image = get_sub_image(frame, center=init_center, img_size=img_size + 100)
-        proc_image = self.pre_process_image(proc_image)
+        proc_image = edge_image(proc_image)
 
         # a set of images are clipped around the init center, each one is used to obtain one center location
         sub_center = (int((img_size + 100) / 2), int((img_size + 100) / 2))
@@ -220,7 +201,7 @@ class CenterTracer(object):
 
         return values
 
-    def offset_by_template(self, frame, lst_center):
+    def __offset_by_template(self, frame, lst_center):
         if self.lst_frame is None:
             self.lst_frame = frame
             return 0, 0
@@ -247,40 +228,26 @@ class CenterTracer(object):
 
         return off_x, off_y
 
-    def coil_on_top(self, coil_ellipse):
+    def __coil_on_top(self, coil_ellipse):
+        # 判断带卷是在高处还是基坑中
         return coil_ellipse[1] < 1300
 
-    def car_speed(self, coil_ellipse, plc):
-        spd = None
-        if plc.car_up:
-            spd = self.car_spd_up
-        elif plc.car_down:
-            spd = self.car_spd_down
-        elif plc.car_forward:
-            spd = self.car_spd_forward_top if self.coil_on_top(coil_ellipse) else self.car_spd_forward_btn
-        elif plc.car_backward:
-            spd = self.car_spd_backward_top if self.coil_on_top(coil_ellipse) else self.car_spd_backward_btn
-        else:
-            spd = (0.0, 0.0)
-        return spd
-
-    def offset_by_car_movement(self, coil_ellipse, plc, interval):
+    def __offset_by_car_movement(self, coil_ellipse, plc, interval):
         # 应当考虑小车的惯性，建立一个一节惯性模型
-        spd = None
         if plc.car_up:
             spd = self.car_spd_up
         elif plc.car_down:
             spd = self.car_spd_down
         elif plc.car_forward:
-            spd = self.car_spd_forward_top if self.coil_on_top(coil_ellipse) else self.car_spd_forward_btn
+            spd = self.car_spd_forward_top if self.__coil_on_top(coil_ellipse) else self.car_spd_forward_btn
         elif plc.car_backward:
-            spd = self.car_spd_backward_top if self.coil_on_top(coil_ellipse) else self.car_spd_backward_btn
+            spd = self.car_spd_backward_top if self.__coil_on_top(coil_ellipse) else self.car_spd_backward_btn
         else:
             spd = (0.0, 0.0)
 
         return spd[0] * interval, spd[1] * interval
 
-    def ellipse_expected(self, center, neighbor=7):
+    def __ellipse_expected(self, center, neighbor=7):
         if self.exp_ellipse is None:
             return None
 
@@ -300,39 +267,14 @@ class CenterTracer(object):
         else:
             return None
 
-    def fit_ellipse(self, frame, init_ellipse):
-        init_ellipse = init_ellipse.copy()
-        init_center = (init_ellipse[0], init_ellipse[1])
-
-        proc_image = get_sub_image(frame, center=init_center, img_size=self.WINDOW_SIZE)
-        proc_image = edge_image(proc_image)
-
-        init_ellipse[0] = init_ellipse[1] = int(self.WINDOW_SIZE / 2)
-        proc_image = filter_around_ellipse(proc_image, init_ellipse)
-        ellipse = fit_ellipse(proc_image, threshold=50)
-
-        if self.show_fitting:
-            img = cv2.cvtColor(proc_image, cv2.COLOR_GRAY2BGR)
-            if ellipse is not None:
-                cv2.ellipse(img, (int(ellipse[0]), int(ellipse[1])), (int(ellipse[2]), int(ellipse[3])),
-                            int(ellipse[4]),
-                            0, 360, (0, 255, 0), 1)
-            cv2.imshow("Ellipse fitting", img)
-
-        if ellipse is None:
-            return None
-
-        ellipse[0], ellipse[1] = calc_original_pos((ellipse[0], ellipse[1]), self.WINDOW_SIZE, init_center)
-        # 对椭圆进行滤波，内圆中心点由卡尔曼滤波，不在这里处理
-        if self.lst_ellipses is not None:
-            for i in range(2, 5, 1):
-                ellipse[i] = self.lst_ellipses[i] * self.low_pass_k + ellipse[i] * (1.0 - self.low_pass_k)
-        self.lst_ellipses = ellipse
-
-        return ellipse
-
     @staticmethod
-    def get_ellipse_array(ellipse_temp):
+    def __get_ellipse_array(ellipse_temp):
+        """
+        将椭圆每个像点的坐标转换到数组里
+        这部分程序以后可以做一下优化
+        :param ellipse_temp:
+        :return:
+        """
         canvas = np.zeros((512, 512), dtype=np.uint8)
         cv2.ellipse(canvas, (256, 256), (ellipse_temp[0], ellipse_temp[1]),
                     ellipse_temp[2], ellipse_temp[3], ellipse_temp[4], 255,
@@ -340,12 +282,18 @@ class CenterTracer(object):
         ellipse = np.array(np.where(canvas > 0))
         return ellipse
 
-    def fit_exp_ellipse(self, image, ellipse_temp):
+    def __fit_exp_ellipse(self, image, ellipse_temp):
+        """
+        找出预期椭圆最接近的位置
+        :param image:
+        :param ellipse_temp:
+        :return:
+        """
         offset = 16
         max_fitness = 0
         bst_center = None
 
-        ellipse = self.get_ellipse_array(ellipse_temp)
+        ellipse = self.__get_ellipse_array(ellipse_temp)
         max_x = np.max(ellipse[1])
         min_x = np.min(ellipse[1])
         max_y = np.max(ellipse[0])
@@ -366,7 +314,7 @@ class CenterTracer(object):
             return None
 
     @staticmethod
-    def calc_ellipse_diff(ellipse_exp, ellipse):
+    def __calc_ellipse_diff(ellipse_exp, ellipse):
         # 角度误差的量纲和长度不一样，混合在一起比较麻烦，因此不考虑角度误差
         long_err = (ellipse[2] - ellipse_exp[2]) / ellipse_exp[2]
         short_err = (ellipse[3] - ellipse_exp[3]) / ellipse_exp[3]
@@ -374,16 +322,22 @@ class CenterTracer(object):
         return total_err
 
     @staticmethod
-    def draw_ellipse(image, ellipse, color):
+    def __draw_ellipse(image, ellipse, color):
         cv2.ellipse(image, (ellipse[0], ellipse[1]), (ellipse[2], ellipse[3]), ellipse[4], 0, 360, color, 2)
 
     @staticmethod
-    def show_ellipse(image, ellipse, color, caption):
+    def __show_ellipse(image, ellipse, color, caption):
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         cv2.ellipse(image, (ellipse[0], ellipse[1]), (ellipse[2], ellipse[3]), ellipse[4], 0, 360, color, 1)
         cv2.imshow(caption, image)
 
-    def calc_coil_inner_ellipse(self, frame, init_ellipse):
+    def __calc_coil_inner_ellipse(self, frame, init_ellipse):
+        """
+        基于视觉检测带卷内椭圆
+        :param frame:
+        :param init_ellipse:
+        :return:
+        """
         # 注意：这里存在重复计算图像边缘的问题，需要优化
         self.ellipse_exp = None
         self.ellipse_fit = None
@@ -392,7 +346,7 @@ class CenterTracer(object):
         self.warning = WarningType.ok
 
         # 基于CNN网络搜索带卷中心椭圆，由于噪音影响，该椭圆存在一定误差
-        self.ellipse_cnn = self.center_by_net(frame, self.WINDOW_SIZE, init_ellipse)
+        self.ellipse_cnn = self.__center_by_net(frame, self.WINDOW_SIZE, init_ellipse)
 
         # 刚开始跟踪带卷时，精度可能较差，先不做精细拟合处理
         if self.ellipse_cnn[0] > self.noise_filter_begin:
@@ -400,7 +354,7 @@ class CenterTracer(object):
             return self.ellipse_vision
 
         # 找出该位置的的期望椭圆，计算椭圆掩膜，用于过滤掩膜之外的边缘图像
-        self.ellipse_exp = self.ellipse_expected(self.ellipse_cnn, neighbor=15)
+        self.ellipse_exp = self.__ellipse_expected(self.ellipse_cnn, neighbor=15)
         ellipse_mask = self.ellipse_exp if self.ellipse_exp is not None else self.ellipse_cnn
 
         # 截取带卷中心附近子图，计算边缘，滤除内椭圆之外的边缘
@@ -414,19 +368,19 @@ class CenterTracer(object):
         self.ellipse_fit = fit_ellipse(image, threshold=50)
         if self.ellipse_fit is not None:
             self.ellipse_fit = (self.ellipse_fit + 0.5).astype(np.int32)
-            if self.show_fitting:
-                self.show_ellipse(image, self.ellipse_fit, (0, 255, 0), "Ellipse fitting")
+            if SHOW_FITTING_ELLIPSE:
+                self.__show_ellipse(image, self.ellipse_fit, (0, 255, 0), "Ellipse fitting")
             self.ellipse_fit[0], self.ellipse_fit[1] = \
                 calc_original_pos(pos=self.ellipse_fit, img_size=self.WINDOW_SIZE, init_center=ellipse_mask)
 
         # 如果预期椭圆存在，则用该椭圆拟合带卷内椭圆
         if self.ellipse_exp is not None:
             ellipse_temp = (self.ellipse_exp[2], self.ellipse_exp[3], self.ellipse_exp[4], 0, 360, 3)
-            self.ellipse_exp_fit = self.fit_exp_ellipse(image, ellipse_temp)
+            self.ellipse_exp_fit = self.__fit_exp_ellipse(image, ellipse_temp)
             if self.ellipse_exp_fit is not None:
                 self.ellipse_exp_fit = np.array(self.ellipse_exp_fit)
-                if self.show_fitting:
-                    self.show_ellipse(image, self.ellipse_exp_fit, (0, 255, 0), "Expected ellipse fitting")
+                if SHOW_FITTING_ELLIPSE:
+                    self.__show_ellipse(image, self.ellipse_exp_fit, (0, 255, 0), "Expected ellipse fitting")
                 self.ellipse_exp_fit[0], self.ellipse_exp_fit[1] = \
                     calc_original_pos(pos=self.ellipse_exp_fit, img_size=self.WINDOW_SIZE, init_center=ellipse_mask)
 
@@ -449,28 +403,28 @@ class CenterTracer(object):
             self.ellipse_vision = ellipse_vision.astype(np.int32)
         return self.ellipse_vision
 
-    def kalman_filter(self, center, offset):
+    def __kalman_filter(self, center, offset):
         x = np.array((center[0], offset[0], center[1], offset[1]))
         self.kalman.predict()
         self.kalman.update(x)
         return np.array((self.kalman.x[0], self.kalman.x[2]))
 
-    def track_coil(self, frame, plc, proc_interval):
+    def __track_coil(self, frame, plc, proc_interval):
         # 基于视觉方式检测带卷内椭圆
-        ellipse_vision = self.calc_coil_inner_ellipse(frame, init_ellipse=self.ellipse_kalman)
+        ellipse_vision = self.__calc_coil_inner_ellipse(frame, init_ellipse=self.ellipse_kalman)
 
         # locate coil offset by frame difference
-        ox, oy = self.offset_by_template(frame, lst_center=self.ellipse_kalman)
+        ox, oy = self.__offset_by_template(frame, lst_center=self.ellipse_kalman)
 
         # 可以读取到PLC状态时，利用小车的当前运动方向修正计算带卷的运动偏移量
         if plc is not None and self.car_considered:
-            ox_car, oy_car = self.offset_by_car_movement(ellipse_vision, plc, proc_interval)
+            ox_car, oy_car = self.__offset_by_car_movement(ellipse_vision, plc, proc_interval)
             if ox_car != np.nan:
                 ox = ox_car * self.car_confidence + ox * (1.0 - self.car_confidence)
                 oy = oy_car * self.car_confidence + oy * (1.0 - self.car_confidence)
 
         # kalman filter
-        self.ellipse_kalman[0:2] = self.kalman_filter(ellipse_vision, (ox, oy))
+        self.ellipse_kalman[0:2] = self.__kalman_filter(ellipse_vision, (ox, oy))
         self.ellipse_kalman[2:5] = self.ellipse_kalman[2:5] * self.low_pass_k + \
                                    ellipse_vision[2:5] * (1.0 - self.low_pass_k)
 
@@ -482,7 +436,7 @@ class CenterTracer(object):
         self.coil_ellipse = coil_ellipse
 
         # 评估检测跟踪误差
-        self.evaluate_tracking(self.coil_ellipse, coil_movement, plc, proc_interval)
+        self.__evaluate_tracking(self.coil_ellipse, coil_movement, plc, proc_interval)
 
         # 记录运动轨迹，画图用
         self.kalman_trace.append(self.coil_ellipse)
@@ -492,74 +446,40 @@ class CenterTracer(object):
         if len(self.vision_trace) > 100:
             self.vision_trace.pop(0)
 
-    def analyze_one_frame(self, frame, plc=None):
-        # 采样时间间隔
-        self.proc_interval = time.perf_counter() - self.start_time
-        self.start_time = time.perf_counter()
-
-        self.coil_locator.analyze_one_frame(frame)
-        center = self.coil_locator.center
-        self.coil_ellipse = (center[0], center[1], 100, 100, 0)
-        cv2.circle(frame, center, radius=5, color=255, thickness=2)
-        cv2.imshow("", frame)
-
-        return
-
-        # 初始状态下，默认为堆料区没有带卷，首先检测是否存在带卷
-        # 发现堆料区有带卷时，则检测带卷的初始位置。如果初始位置处于正常堆料区范围之内，则开始跟踪带卷。
-        # 在跟踪过程中，如果带卷位置超出了正常范围，则告警，并设置跟踪状态为没有带卷，从而重新开始跟踪周期。
-        # 如果上卷结束，设置跟踪状态为没有带卷，从而重新开始跟踪周期。
-        if self.tracking_status == TrackingStatus.no_coil:
-            if self.coil_exist.analyze_one_frame(frame):
-                self.tracking_status = TrackingStatus.init_position
-            self.coil_locator.init_one_cycle()
-        elif self.tracking_status == TrackingStatus.init_position:
-            self.coil_locator.analyze_one_frame(frame)
-            center = self.coil_locator.center
-            if 1800 < center[0] < start_keypoint[0]:   # 当带卷初始位置在堆料区时，初始化带卷跟踪
-                self.init_one_cycle(init_ellipse=(center[0], center[1], 100, 100, 0))
-                self.tracking_status = TrackingStatus.tracking
-        else:
-            self.track_coil(frame, plc, self.proc_interval)
-
-            self.tracking_frame_id += 1
-            if self.tracking_frame_id > 5 and self.ellipse_out_of_bound(self.coil_ellipse):
-                self.restart_tracking()
-
     @staticmethod
-    def calc_supposed_y(begin, end, x):
+    def __calc_supposed_y(begin, end, x):
         k = (end[1] - begin[1]) / (end[0] - begin[0])
         y = (x - begin[0]) * k + begin[1]
         return y
 
     @staticmethod
-    def calc_supposed_x(begin, end, y):
+    def __calc_supposed_x(begin, end, y):
         k = (end[0] - begin[0]) / (end[1] - begin[1])
         x = (y - begin[1]) * k + begin[0]
         return x
 
-    def ellipse_out_of_bound(self, center):
+    def __ellipse_out_of_bound(self, center):
         if center[0] > start_keypoint[0] or center[0] < end_keypoint[0]:
             # print("越界退出, x = %1.1f, y = %1.1f" % (center[0], center[0]))
             return True
         elif center[0] > drop_keypoint[0] + 100:
-            y = self.calc_supposed_y(start_keypoint, drop_keypoint, center[0])
+            y = self.__calc_supposed_y(start_keypoint, drop_keypoint, center[0])
             if math.fabs(center[1] - y) > 100:
                 print("x = %1.1f, 预期高度 %1.1f, 实测高度 %1.1f" % (center[0], y, center[1]))
                 return True
         elif center[0] < drop_keypoint[0] - 100:
-            y = self.calc_supposed_y(alignment_keypoint, end_keypoint, center[0])
+            y = self.__calc_supposed_y(alignment_keypoint, end_keypoint, center[0])
             if math.fabs(center[1] - y) > 100:
                 print("x = %1.1f, 预期高度 %1.1f, 实测高度 %1.1f" % (center[0], y, center[1]))
                 return True
         else:
-            x = self.calc_supposed_x(drop_keypoint, alignment_keypoint, center[1])
+            x = self.__calc_supposed_x(drop_keypoint, alignment_keypoint, center[1])
             if math.fabs(center[0] - x) > 200:
                 print("y = %1.1f, 预期位置 %1.1f, 实测位置 %1.1f" % (center[1], x, center[0]))
                 return True
         return False
 
-    def evaluate_tracking(self, ellipse, movement, plc, proc_interval):
+    def __evaluate_tracking(self, ellipse, movement, plc, proc_interval):
         """
         评估跟踪质量
         """
@@ -567,15 +487,82 @@ class CenterTracer(object):
         if self.ellipse_exp is None:
             self.err_ellipse = np.nan
         else:
-            self.err_ellipse = self.calc_ellipse_diff(ellipse, self.ellipse_exp)
+            self.err_ellipse = self.__calc_ellipse_diff(ellipse, self.ellipse_exp)
 
         # 评估运动量是否出现明显错误
         if plc is not None and movement is not None:
-            exp_ox, exp_oy = self.offset_by_car_movement(ellipse, plc, proc_interval)
+            exp_ox, exp_oy = self.__offset_by_car_movement(ellipse, plc, proc_interval)
             if exp_ox != np.nan:
                 err_x = (movement[0] - exp_ox) / (exp_ox * 1.5 if math.fabs(exp_ox) > 1 else 5)
                 err_y = (movement[1] - exp_oy) / (exp_oy * 1.5 if math.fabs(exp_oy) > 1 else 5)
                 self.err_movement = math.sqrt(err_x ** 2 + err_y ** 2)
+
+    def load_model(self, model_file):
+        """
+        加载网络模型
+        :param model_file:
+        :return:
+        """
+        self.coil_net.load_model(model_file)
+
+    def read_trace_stat(self, file_name):
+        """
+        读取带卷统计参数
+        :param file_name:
+        :return:
+        """
+        trace_stat = {}
+        csv_reader = csv.reader(open(file_name, 'r'))
+        for line in csv_reader:
+            center = (int(float(line[0])), int(float(line[1])))  # 椭圆中心位置
+            values = (int(float(line[2]) + 0.5), int(float(line[3]) + 0.5), int(float(line[4]) + 0.5))
+            trace_stat[center] = values
+        self.exp_ellipse = trace_stat
+
+    def restart_tracking(self):
+        """
+        重新启动跟踪
+        :return:
+        """
+        self.tracking_status = TrackingStatus.NO_COIL
+        self.tracking_frame_id = 0
+
+    def analyze_one_frame(self, frame, plc=None):
+        """
+        分析视频的一帧画面，检测和跟踪带卷。检测跟踪有3个状态：
+        1. NO_COIL: 初始状态下，默认为堆料区没有带卷，首先检测是否存在带卷(self.coil_exist)。如果检测出带卷，则进入下一状态
+        2. LOCATING: 由self.coil_locator检测带卷的初始位置，如果初始位置满足跟踪条件，则进入跟踪状态
+        3. TRACKING: 对带卷进行持续精确跟踪定位。上一级程序(AutoLoad)使用跟踪数据控制上卷(自动控制时)，或者监控上卷阶段(监控模式)。
+                     当上卷结束时，上层程序调用restart_tracking()函数重新开始新的带卷跟踪。如果跟踪位置时超出预计轨迹范围，
+                     则置coil_outof_route=True，通知上层程序，由上层程序决定是否重新开始跟踪。
+        :param frame:
+        :param plc:
+        :return:
+        """
+        # 采样时间间隔
+        self.proc_interval = time.perf_counter() - self.start_time
+        self.start_time = time.perf_counter()
+
+        # 分析图像
+        if self.tracking_status == TrackingStatus.NO_COIL:
+            if self.coil_exist.analyze_one_frame(frame):
+                self.tracking_status = TrackingStatus.LOCATING
+            self.coil_locator.init_one_cycle()
+        elif self.tracking_status == TrackingStatus.LOCATING:
+            center = self.coil_locator.analyze_one_frame(frame)
+            if TRACKING_BEGIN_X < center[0]:   # < start_keypoint[0]:   # 当带卷初始位置在堆料区时，初始化带卷跟踪
+                self.__init_one_cycle(init_ellipse=(center[0], center[1], 100, 100, 0))
+                self.tracking_status = TrackingStatus.TRACKING
+                self.tracking_frame_id = 0
+        elif self.tracking_status == TrackingStatus.TRACKING:
+            # 跟踪带卷，检查带卷是否超出合理范围
+            # 刚刚由定位阶段转到跟踪阶段时，跟踪误差较大，因此最开始的几帧图像不进行判断
+            self.tracking_frame_id += 1
+            self.__track_coil(frame, plc, self.proc_interval)
+            if self.tracking_frame_id > 5 and self.__ellipse_out_of_bound(self.coil_ellipse):
+                self.coil_outof_route = True
+
+        return self.coil_ellipse, self.tracking_status
 
     def show_trace(self, frame):
         if self.coil_ellipse is None:
@@ -585,7 +572,7 @@ class CenterTracer(object):
         if self.ellipse_vision is not None:
             cv2.circle(frame, (self.ellipse_vision[0], self.ellipse_vision[1]), 2, (255, 0, 0), 2)
         cv2.circle(frame, (self.coil_ellipse[0], self.coil_ellipse[1]), 2, (0, 255, 0), 2)
-        self.draw_ellipse(frame, self.coil_ellipse, color=(0, 255, 0))
+        self.__draw_ellipse(frame, self.coil_ellipse, color=(0, 255, 0))
 
         # show center moving trace
         if len(self.kalman_trace) > 0:
@@ -615,20 +602,19 @@ if __name__ == '__main__':
 
     mode = input("Train(T) the model, or run(R) the model?")
     if mode == 't' or mode == 'T':
-        train_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Train_no_noise",
-                             output_size=LabelType.InnerOnly, img_size=512)
+        train_set = ImageSet(output_size=LabelType.InnerOnly, img_size=512)
+        train_set.load("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Train_no_noise")
+        eval_set = train_set.random_subset(sample_ration=0.3)
+
         train_set.random_noise = False
         train_set.batch_size = 1000
-
-        eval_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Eval_no_noise",
-                             output_size=LabelType.InnerOnly, img_size=512)
         eval_set.random_noise = False
         eval_set.batch_size = 1000
         Net.train(train_set, eval_set, epoch_cnt=10000, mini_batch=64)
     else:
         Net.load_model("带卷定位2022-08-06-22-02.pt")
-        eval_set = ImageSet("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Eval_no_noise",
-                            output_size=LabelType.InnerOnly, img_size=512)
+        eval_set = ImageSet(output_size=LabelType.InnerOnly, img_size=512)
+        eval_set.load("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\带卷定位训练\\Eval_no_noise")
         eval_set.random_noise = False
         Net.test_net(eval_set)
         #Net.denoise_test(eval_set)

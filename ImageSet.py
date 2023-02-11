@@ -195,7 +195,7 @@ class ImageSet:
             cv2.imshow("", img)
             cv2.waitKey(0)
 
-    def random_subset(self, sample_ration, remove=False):
+    def random_subset(self, sample_ration, remove=True):
         new_set = ImageSet(output_size=self.output_size, img_size=self.img_size)
         sample_list = random.sample(range(0, len(self.file_list)), int(len(self.file_list) * sample_ration) )
         for _, i in enumerate(sample_list):

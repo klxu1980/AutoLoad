@@ -11,7 +11,7 @@ from CoilImageProc import *
 
 
 ROI = (1000, 0, 2048, 2048)
-SHOW_PROCESS = True
+SHOW_PROCESS = False
 
 
 class CoilLocator(object):

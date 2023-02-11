@@ -38,12 +38,8 @@ class AutoLoader(object):
         # 加载各个检测模型
         self.__load_models()
 
-        # 初始化实际控制使用的硬件
-        # 如果硬件打开失败，则退出
-        self.plc = PLCComm()
-        self.camera = None
-        if not run_as_demo and not self.__init_hardwares():
-            exit(0)
+        # 初始化plc和摄像头硬件
+        self.__init_hardwares()
 
         self.demo_video = None    # 当前的demo视频
         self.uploading_start_time = None  # 上卷开始时间
@@ -66,6 +62,9 @@ class AutoLoader(object):
         self.video_raw = None
         self.video_proc = None
 
+    def __del__(self):
+        self.plc.close()
+
     def __load_models(self):
         # self.coil_tracker是核心跟踪器
         self.coil_tracker = CenterTracer()
@@ -84,18 +83,16 @@ class AutoLoader(object):
         self.coil_open_status.load_model(PYTHON_PATH + "开卷检测2020-10-24-12-12.pt")
 
     def __init_hardwares(self):
-        # 与PLC的TCP通信
-        if not self.plc.connect():
-            return False
+        # 初始化并启动plc
+        self.plc = PLCComm(self.run_as_demo)
+        self.plc.start()
 
-        # 打开相机
+        # 初始化摄像头
         try:
-            self.camera = HKCamera()
+            self.camera = None if self.run_as_demo else HKCamera()
         except Exception as e:
-            print(e)
-            return False
-
-        return True
+            print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:  ") + str(e))
+            exit(0)
 
     @staticmethod
     def datetime_string():
@@ -150,17 +147,6 @@ class AutoLoader(object):
             self.camera.refresh()
             return self.camera.get_image()
 
-    def init_one_cycle(self):
-        """
-        准备开始新带卷的自动上卷控制。只需要上卷时调用一次，也可多次调用，对上卷无影响。
-        :return: 无
-        """
-        self.loading_stage = LoadStage.WAITING_4_LOADING
-        self.uploading_start_time = None
-        self.video_raw = None
-        self.video_proc = None
-        self.csv = None
-
     def init_one_test_cycle(self, file_name):
         self.init_one_cycle()
 
@@ -193,19 +179,14 @@ class AutoLoader(object):
             if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
                 self.record_raw_video(frame_bgr)
 
-            # 更新PLC状态
-            if self.plc.connected:
-                self.plc.refresh_status()
-
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
             self.track_one_frame(frame=frame_gray, plc=self.plc)
             self.car_ctrl()
 
-            # 向PLC写运行状态
+            # 向PLC写带卷位置
             if self.coil_tracker.coil_ellipse is not None:
-                self.plc.inner_ellipse = self.coil_tracker.coil_ellipse
-            if self.plc.connected:
-                self.plc.send_order()
+                self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
+                # 没有跟踪数据时上传什么??
 
             # 显示控制信息和操作按钮
             text_top = self.show_old_loading_info(frame=frame_bgr, text_top=20)
@@ -297,47 +278,55 @@ class AutoLoader(object):
         elif key == ord('o') or key == ord('O'):
             self.loading_stage = 2
 
+    def init_one_cycle(self):
+        """
+        准备开始新带卷的自动上卷控制。只需要上卷时调用一次，也可多次调用，对上卷无影响。
+        :return: 无
+        """
+        self.loading_stage = LoadStage.WAITING_4_LOADING
+        self.uploading_start_time = None
+        self.video_raw = None
+        self.video_proc = None
+        self.csv = None
+
     def track_one_frame(self, frame, plc):
         # 在监视模式下，上卷终止有可能判断错误，导致始终处于上卷状态
         # 因此，判断上卷开始后，开始计时，如果1分钟内还没有结束，则强制进入等待上卷状态
-        if self.uploading_start_time is not None and time.perf_counter() - self.uploading_start_time > 60.0:
+        if self.uploading_start_time is not None and (datetime.datetime.now() - self.uploading_start_time).seconds > 60:
             self.loading_stage = LoadStage.WAITING_4_LOADING
             self.coil_tracker.restart_tracking()
 
         # 目前带卷跟踪仅用于监视带卷位置
+        # 带卷跟踪有4个阶段：
+        # 1. 等待上卷：带卷位于堆料区(也可能没有带卷)，等待上卷。首先检测判断堆料区是否有带卷(self.coil_tracker.coil_exist)，
+        #    之后检测带卷的初始位置(self.coil_tracker.coil_locator)。
         if self.loading_stage == LoadStage.WAITING_4_LOADING:
             self.init_one_cycle()
 
             # 检测跟踪带卷，如果带卷不存在，则返回None
-            self.coil_tracker.analyze_one_frame(frame, plc)
-            if self.coil_tracker.coil_ellipse is None:
-                return
-
-            # 当带卷位置小于1800时，认为开始上卷
-            if self.coil_tracker.coil_ellipse[0] < 1800:
-                self.loading_stage = LoadStage.MOVING_TO_UNPACKER
-                self.uploading_start_time = time.perf_counter()
-                if not self.run_as_demo:
-                    self.init_record(frame)
+            coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
+            if status == TrackingStatus.TRACKING and coil is not None:
+                # 当带卷位置小于1800时，认为开始上卷
+                if coil[0] < 1800:
+                    self.loading_stage = LoadStage.MOVING_TO_UNPACKER
+                    self.uploading_start_time = datetime.datetime.now()
+                    if not self.run_as_demo:
+                        self.init_record(frame)
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             # 跟踪带卷位置
             # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
-            self.coil_tracker.analyze_one_frame(frame, plc)
-            # if self.coil_tracker.tracking_status in (TrackingStatus.no_coil, TrackingStatus.init_position):
-            #     self.loading_stage = LoadStage.WAITING_4_LOADING
-            #     return
-
             # 如果带卷位置小于上卷终止位置，则进入下一阶段，检测带卷是否已装入开卷机
-            if self.coil_tracker.coil_ellipse is not None and self.coil_tracker.coil_ellipse[0] < end_keypoint[0]:
+            coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
+            if status != TrackingStatus.TRACKING:
+                self.loading_stage = LoadStage.WAITING_4_LOADING
+            elif coil is not None and coil[0] < end_keypoint[0]:
                 self.loading_stage = LoadStage.INTO_UNPACKER
                 self.coil_tracker.restart_tracking()
         elif self.loading_stage == LoadStage.INTO_UNPACKER:
-            status = self.coil_pos_status.analyze_one_frame(frame)
-            if status:
+            if self.coil_pos_status.analyze_one_frame(frame):
                 self.loading_stage = LoadStage.UNPACKING
         elif self.loading_stage == LoadStage.UNPACKING:
-            status = self.coil_open_status.analyze_one_frame(frame)
-            if status:
+            if self.coil_open_status.analyze_one_frame(frame):
                 self.loading_stage = LoadStage.WAITING_4_LOADING
 
     def car_ctrl(self):
@@ -370,7 +359,9 @@ class AutoLoader(object):
 
     def show_loading_info(self, frame, text_top):
         # 显示当前时间
-        self.show_text(frame, datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S"), (frame.shape[1] - 600, text_top))
+        now = datetime.datetime.now()
+        time_str = now.strftime("%Y-%m-%d, %H:%M:%S:") + ("%03d" % int(now.microsecond * 0.001))
+        self.show_text(frame, time_str, (frame.shape[1] - 600, 40))
 
         # 显示PLC状态信息
         text_top += 40
@@ -411,7 +402,7 @@ class AutoLoader(object):
 
         # 正在跟踪带卷，显示跟踪状态信息
         status_str = ""
-        if self.coil_tracker.tracking_status == TrackingStatus.tracking:
+        if self.coil_tracker.tracking_status == TrackingStatus.TRACKING:
             # 带卷跟踪中，显示带卷的中心轨迹，以及跟踪误差
             status_str = "Tracking coil"
             self.coil_tracker.show_trace(frame)
@@ -421,9 +412,9 @@ class AutoLoader(object):
                               (ellipse[0], ellipse[1],
                                self.coil_tracker.err_ellipse * 100.0,
                                self.coil_tracker.err_movement * 100.0)
-        elif self.coil_tracker.tracking_status == TrackingStatus.no_coil:
+        elif self.coil_tracker.tracking_status == TrackingStatus.NO_COIL:
             status_str = "No coil"
-        elif self.coil_tracker.tracking_status == TrackingStatus.init_position:
+        elif self.coil_tracker.tracking_status == TrackingStatus.LOCATING:
             status_str = "Initializing coil center"
             init_center = self.coil_tracker.coil_locator.center
             if init_center is not None:
@@ -577,6 +568,8 @@ def real_control():
     pass
 
 if __name__ == '__main__':
+    print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:%M:%f"))
+
     demo_test()
 
     # auto_loader = AutoLoader(run_as_demo=False)
