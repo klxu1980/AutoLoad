@@ -1,21 +1,23 @@
 """
 从张方远程序中拿出来的参数
 """
-PositionL1P1 = (1000, 950)   # 定位线1点1
-PositionL1P2 = (1230, 810)   # 定位线1点2
-PositionL2P1 = (1230, 810)   # 定位线2点1
-PositionL2P2 = (2280, 1260)  # 定位线2点2
-PositionL3P1 = (2280, 1260)  # 定位线3点1
-PositionL3P2 = (1880, 1950)  # 定位线3点2
+# 基坑标记线
+PitMarkL1P1 = (1000, 950)   # 定位线1点1
+PitMarkL1P2 = (1230, 810)   # 定位线1点2
+PitMarkL2P1 = (1230, 810)   # 定位线2点1
+PitMarkL2P2 = (2280, 1260)  # 定位线2点2
+PitMarkL3P1 = (2280, 1260)  # 定位线3点1
+PitMarkL3P2 = (1880, 1950)  # 定位线3点2
 
-start_keypoint = (1900, 500)  # 全局点:预测大卷起始点
-start_keypoint1 = (1900, 530) # 全局点:预测小卷起始点
+# 带卷运动轨迹
+coil_trans_begin = (1900, 500)     # 上卷(大卷)起始点。(1900, 530)
+# coil_trans_begin = (1900, 530)     # 上卷(小卷)起始点。(1900, 530)
 
-drop_keypoint = (1400, 800)   # 全局点：大卷关键点下降点
-drop_keypoint1 = (1400, 830) # 全局点：小卷关键点下降点
+coil_fall_begin = (1400, 800)      # 带卷下落起始点
+coil_fall_begin1 = (1400, 830)     # 全局点：小卷关键点下降点
 
-alignment_keypoint = (1420, 1510) # 全局点：关键点对准点
-end_keypoint = (1210, 1710)		  # 全局点：预测结束点
+alignment_keypoint = (1420, 1510)  # 全局点：关键点对准点
+end_keypoint = (1210, 1710)		   # 全局点：预测结束点
 
 stage1_up1 = (1900, 460)   # 平移阶段1运动上区间线右点
 stage1_up2 = (1365, 781)   # 平移阶段1运动上区间线左点
@@ -39,3 +41,5 @@ AIMING_END = end_keypoint[0]
 
 # 根据现场状况增加的参数
 TRACKING_BEGIN_X = 1800       # 带卷初始定位超过该位置时，进入到带卷跟踪状态
+
+RECORD_ROOT_PATH = "D:\\huada2#data"

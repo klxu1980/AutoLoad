@@ -96,7 +96,7 @@ class CenterTracer(object):
         self.err_cnn_vs_fit = -1         # cnn椭圆与拟合椭圆比值
         self.err_ellipse    = -1         # 最终椭圆检测结果误差
         self.err_movement   = -1
-        self.coil_outof_route = False    # 带卷跟踪超出合理范围
+        self.coil_within_route = True    # 带卷跟踪超出合理范围
 
         # 带卷跟踪状态
         self.tracking_status = TrackingStatus.NO_COIL
@@ -458,26 +458,21 @@ class CenterTracer(object):
         x = (y - begin[1]) * k + begin[0]
         return x
 
-    def __ellipse_out_of_bound(self, center):
-        if center[0] > start_keypoint[0] or center[0] < end_keypoint[0]:
-            # print("越界退出, x = %1.1f, y = %1.1f" % (center[0], center[0]))
-            return True
-        elif center[0] > drop_keypoint[0] + 100:
-            y = self.__calc_supposed_y(start_keypoint, drop_keypoint, center[0])
-            if math.fabs(center[1] - y) > 100:
-                print("x = %1.1f, 预期高度 %1.1f, 实测高度 %1.1f" % (center[0], y, center[1]))
-                return True
-        elif center[0] < drop_keypoint[0] - 100:
-            y = self.__calc_supposed_y(alignment_keypoint, end_keypoint, center[0])
-            if math.fabs(center[1] - y) > 100:
-                print("x = %1.1f, 预期高度 %1.1f, 实测高度 %1.1f" % (center[0], y, center[1]))
-                return True
+    def __ellipse_within_bound(self, center):
+        supp_y_top = self.__calc_supposed_y(coil_trans_begin, coil_fall_begin, center[0])    # 带卷在基坑上端平移时的预期高度
+        supp_y_btm = self.__calc_supposed_y(alignment_keypoint, end_keypoint, center[0])     # 带卷在基坑下端平移时的预期高度
+        supp_x_fall = self.__calc_supposed_x(coil_fall_begin, alignment_keypoint, center[1]) # 带卷在垂直下落时的预期水平位置
+        max_err_y = 100
+        max_err_x = 100
+
+        if supp_y_top - max_err_y < center[1] < supp_y_top + max_err_y:
+            return center[0] > supp_x_fall - max_err_x
+        elif supp_y_btm - max_err_y < center[1] < supp_y_btm + max_err_y:
+            return center[0] < supp_x_fall + max_err_x
+        elif supp_x_fall - max_err_x < center[0] < supp_x_fall + max_err_x:
+            return supp_y_top - max_err_y < center[1] < supp_y_btm + max_err_y
         else:
-            x = self.__calc_supposed_x(drop_keypoint, alignment_keypoint, center[1])
-            if math.fabs(center[0] - x) > 200:
-                print("y = %1.1f, 预期位置 %1.1f, 实测位置 %1.1f" % (center[1], x, center[0]))
-                return True
-        return False
+            return False
 
     def __evaluate_tracking(self, ellipse, movement, plc, proc_interval):
         """
@@ -534,7 +529,7 @@ class CenterTracer(object):
         2. LOCATING: 由self.coil_locator检测带卷的初始位置，如果初始位置满足跟踪条件，则进入跟踪状态
         3. TRACKING: 对带卷进行持续精确跟踪定位。上一级程序(AutoLoad)使用跟踪数据控制上卷(自动控制时)，或者监控上卷阶段(监控模式)。
                      当上卷结束时，上层程序调用restart_tracking()函数重新开始新的带卷跟踪。如果跟踪位置时超出预计轨迹范围，
-                     则置coil_outof_route=True，通知上层程序，由上层程序决定是否重新开始跟踪。
+                     则置coil_within_route=False，通知上层程序，由上层程序决定是否重新开始跟踪。
         :param frame:
         :param plc:
         :return:
@@ -548,19 +543,23 @@ class CenterTracer(object):
             if self.coil_exist.analyze_one_frame(frame):
                 self.tracking_status = TrackingStatus.LOCATING
             self.coil_locator.init_one_cycle()
-        elif self.tracking_status == TrackingStatus.LOCATING:
+
+        if self.tracking_status == TrackingStatus.LOCATING:
             center = self.coil_locator.analyze_one_frame(frame)
-            if TRACKING_BEGIN_X < center[0]:   # < start_keypoint[0]:   # 当带卷初始位置在堆料区时，初始化带卷跟踪
+            if TRACKING_BEGIN_X < center[0]:   # < coil_trans_begin[0]:   # 当带卷初始位置在堆料区时，初始化带卷跟踪
                 self.__init_one_cycle(init_ellipse=(center[0], center[1], 100, 100, 0))
                 self.tracking_status = TrackingStatus.TRACKING
                 self.tracking_frame_id = 0
-        elif self.tracking_status == TrackingStatus.TRACKING:
+
+        if self.tracking_status == TrackingStatus.TRACKING:
             # 跟踪带卷，检查带卷是否超出合理范围
             # 刚刚由定位阶段转到跟踪阶段时，跟踪误差较大，因此最开始的几帧图像不进行判断
             self.tracking_frame_id += 1
             self.__track_coil(frame, plc, self.proc_interval)
-            if self.tracking_frame_id > 5 and self.__ellipse_out_of_bound(self.coil_ellipse):
-                self.coil_outof_route = True
+            if self.tracking_frame_id < 5:
+                self.coil_within_route = True
+            else:
+                self.coil_within_route = self.__ellipse_within_bound(self.coil_ellipse)
 
         return self.coil_ellipse, self.tracking_status
 

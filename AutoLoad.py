@@ -117,13 +117,22 @@ class AutoLoader(object):
             self.video_save = None
 
     def init_record(self, frame):
-        file_path_name = self.default_saving_path + self.datetime_string()
+        root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
+        if not os.path.exists(root_path):
+            os.makedirs(root_path)
+
+        time_string = datetime.datetime.now().strftime("%H-%M-%S")
+        root_path += "\\" + time_string
+        os.makedirs(root_path)
 
         size = (frame.shape[1], frame.shape[0])
-        self.video_raw = cv2.VideoWriter(file_path_name + "-original.mp4", cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        self.video_proc = cv2.VideoWriter(file_path_name + "-processed.mp4", cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        self.video_raw = cv2.VideoWriter(root_path + "\\" + time_string + "-original.mp4",
+                                         cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        self.video_proc = cv2.VideoWriter(root_path + "\\" + time_string + "-processed.mp4",
+                                          cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        self.plc.new_csv_record(root_path + "\\" + time_string + "-csvdata.csv")
 
-        self.csv = TraceCSV(file_name=file_path_name)
+        #self.csv = TraceCSV(file_name=file_path_name)
 
     def record_raw_video(self, frame):
         if self.video_raw is None:
@@ -176,8 +185,8 @@ class AutoLoader(object):
             frame_bgr = color_image(frame_gray)
 
             # 在现场实测时，一旦开始上卷，则记录原始视频
-            if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
-                self.record_raw_video(frame_bgr)
+            if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING and self.video_raw is not None:
+                self.video_raw.write(frame_bgr)
 
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
             self.track_one_frame(frame=frame_gray, plc=self.plc)
@@ -195,7 +204,9 @@ class AutoLoader(object):
 
             # 在现场实测时，一旦开始上卷，同时记录实际控制视频
             if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
-                self.record_proc_video(frame_bgr)
+                if self.video_proc is not None:
+                    self.video_proc.write(frame_bgr)
+                self.plc.add_csv_record()
 
             # 记录上卷期间带卷跟踪、PLC的状态
             if self.csv is not None and self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
@@ -291,8 +302,8 @@ class AutoLoader(object):
 
     def track_one_frame(self, frame, plc):
         # 在监视模式下，上卷终止有可能判断错误，导致始终处于上卷状态
-        # 因此，判断上卷开始后，开始计时，如果1分钟内还没有结束，则强制进入等待上卷状态
-        if self.uploading_start_time is not None and (datetime.datetime.now() - self.uploading_start_time).seconds > 60:
+        # 因此，判断上卷开始后，开始计时，如果3分钟内还没有结束，则强制进入等待上卷状态
+        if self.uploading_start_time is not None and (datetime.datetime.now() - self.uploading_start_time).seconds > 360:
             self.loading_stage = LoadStage.WAITING_4_LOADING
             self.coil_tracker.restart_tracking()
 
@@ -306,8 +317,10 @@ class AutoLoader(object):
             # 检测跟踪带卷，如果带卷不存在，则返回None
             coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
             if status == TrackingStatus.TRACKING and coil is not None:
+                if not self.coil_tracker.coil_within_route:
+                    self.coil_tracker.restart_tracking()
                 # 当带卷位置小于1800时，认为开始上卷
-                if coil[0] < 1800:
+                elif coil[0] < 1800:
                     self.loading_stage = LoadStage.MOVING_TO_UNPACKER
                     self.uploading_start_time = datetime.datetime.now()
                     if not self.run_as_demo:
@@ -336,14 +349,14 @@ class AutoLoader(object):
         pass
 
     def draw_lines(self, frame):
-        cv2.line(frame, PositionL1P1, PositionL1P2, (0, 255, 255), 8)
-        cv2.line(frame, PositionL2P1, PositionL2P2, (0, 255, 255), 8)
-        cv2.line(frame, PositionL3P1, PositionL3P2, (0, 255, 255), 8)
+        cv2.line(frame, PitMarkL1P1, PitMarkL1P2, (0, 255, 255), 8)
+        cv2.line(frame, PitMarkL2P1, PitMarkL2P2, (0, 255, 255), 8)
+        cv2.line(frame, PitMarkL3P1, PitMarkL3P2, (0, 255, 255), 8)
 
         # 画出三条轨迹线
-        cv2.line(frame, start_keypoint, drop_keypoint, (0, 255, 255), 2)
-        cv2.line(frame, start_keypoint1, drop_keypoint1, (0, 255, 255), 2)
-        cv2.line(frame, drop_keypoint, alignment_keypoint, (0, 255, 255), 2)
+        cv2.line(frame, coil_trans_begin, coil_fall_begin, (0, 255, 255), 2)
+        # cv2.line(frame, coil_trans_begin1, coil_fall_begin1, (0, 255, 255), 2)
+        cv2.line(frame, coil_fall_begin, alignment_keypoint, (0, 255, 255), 2)
         cv2.line(frame, alignment_keypoint, end_keypoint, (0, 255, 255), 2)
 
         # 画出平移阶段区间线
@@ -500,7 +513,7 @@ class AutoLoader(object):
 
         # 新视频打开后，默认不保存跟踪视频，除非按下'S'键
         self.saving_video = False
-        self.paused = True
+        self.paused = False
 
         self.control()
 
@@ -524,7 +537,8 @@ def demo_test():
     print("5: Analyze trace of aiming procedure(low)")
     print("6: Analyze trace of aiming procedure(ok)")
     print("7: Test all videos")
-    mode = input("")
+    # mode = input("")
+    mode = "1"
     if mode == "1":
         # os.chdir("G:\\01 自动上卷视频\\内椭圆参数统计视频")
         os.chdir("DemoVideo")
@@ -565,13 +579,12 @@ def demo_test():
 
 
 def real_control():
-    pass
+    auto_loader = AutoLoader(run_as_demo=False)
+    auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
+    auto_loader.control()
 
 if __name__ == '__main__':
-    print(datetime.datetime.now().strftime("%Y-%m-%d, %H:%M:%S:%M:%f"))
-
     demo_test()
+    # real_control()
 
-    # auto_loader = AutoLoader(run_as_demo=False)
-    # auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
-    # auto_loader.control()
+

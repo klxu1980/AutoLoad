@@ -278,8 +278,8 @@ class PLCComm(threading.Thread):
         else:
             self.__buf_write[35 + id] &= ~mask
 
-    def new_csv_record(self, path):
-        csv_file = open(path + "\\csvdata.csv", "w", newline='')
+    def new_csv_record(self, file_name):
+        csv_file = open(file_name, "w", newline='')
         self.__csv = csv.writer(csv_file)
 
         row = ["年", "月", "日", "时", "分", "秒", "毫秒",
@@ -296,7 +296,7 @@ class PLCComm(threading.Thread):
             return
         now = datetime.datetime.now()
         row = [str(now.year), str(now.month), str(now.day),
-               str(now.hour), str(now.minute), str(now.second), str(now.microsecond),
+               str(now.hour), str(now.minute), str(now.second), str(int(now.microsecond * 0.001)),
                str(self.heartbeat),
                str(self.car_up), str(self.car_down), str(self.car_forward), str(self.car_backward),
                str(self.support_open),
