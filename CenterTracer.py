@@ -17,7 +17,6 @@ filterpy需要单独安装，执行指令"pip install filterpy"
 VC调用filterpy时，有可能会出现"DLL load failed while importing _arpack"错误。该错误通常是scipy的版本兼容性问题引起的。
 可以先删除，再安装scipy。具体方法为：在anaconda prompt下面，执行pip uninstall scipy，再执行pip install scipy。
 """
-SHOW_FITTING_ELLIPSE = False
 
 
 class WarningType(Enum):
@@ -41,9 +40,9 @@ class CenterTracer(object):
         self.coil_net.init_model()
 
         # 使用CNN确定中心位置时，在初始位置附近，随机产生一系列窗口，对窗口中的图像检测中心，然后求平均
-        self.net_x_range = (-20, 20)  # 随机窗口x方向范围
-        self.net_y_range = (-20, 20)  # 随机窗口y方向范围
-        self.net_count = 8  # 随机窗口数量
+        self.net_x_range = (-20, 20)        # 随机窗口x方向范围
+        self.net_y_range = (-20, 20)        # 随机窗口y方向范围
+        self.net_count = CNN_SUB_IMAGE_CNT  # 随机窗口数量
 
         # 通过帧差分检测偏移量时，需要确定检测窗口大小，和窗口相对初始中心点的偏移位置
         self.diff_size = 256           # 检测窗口尺寸，必须是2的指数
@@ -87,6 +86,8 @@ class CenterTracer(object):
         self.ellipse_vision = None         # 基于视觉方式得到的内椭圆
         self.ellipse_kalman = None         # 基于卡尔曼滤波得到的内椭圆
         self.coil_ellipse = None           # 经过整形化的带卷内椭圆，主要用于显示
+        self.img_fitting = None
+        self.img_exp_fitting = None
         self.exp_fit_confidence = 0.75
 
         # 跟踪误差
@@ -152,7 +153,6 @@ class CenterTracer(object):
         # 预先提取图像边缘以提高精度
         # 为了减小计算耗时，仅对目标附近的区域进行边缘提取
         proc_image = get_sub_image(frame, center=init_center, img_size=img_size + 100)
-        proc_image = edge_image(proc_image)
 
         # a set of images are clipped around the init center, each one is used to obtain one center location
         sub_center = (int((img_size + 100) / 2), int((img_size + 100) / 2))
@@ -285,6 +285,7 @@ class CenterTracer(object):
     def __fit_exp_ellipse(self, image, ellipse_temp):
         """
         找出预期椭圆最接近的位置
+        这里需要做优化!!!!!!!!!!!!!!!!!!!!!
         :param image:
         :param ellipse_temp:
         :return:
@@ -329,7 +330,7 @@ class CenterTracer(object):
     def __show_ellipse(image, ellipse, color, caption):
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         cv2.ellipse(image, (ellipse[0], ellipse[1]), (ellipse[2], ellipse[3]), ellipse[4], 0, 360, color, 1)
-        cv2.imshow(caption, image)
+        return image
 
     def __calc_coil_inner_ellipse(self, frame, init_ellipse):
         """
@@ -345,8 +346,15 @@ class CenterTracer(object):
         self.ellipse_vision = None
         self.warning = WarningType.ok
 
+        # 对带卷附近区域做边缘提取
+        sub_img = get_sub_image(frame, center=init_ellipse, img_size=self.WINDOW_SIZE + 100)
+        sub_img_cpy = sub_img.copy()
+        embed_sub_image(img=frame, sub_img=edge_image(sub_img), center=init_ellipse)
+
         # 基于CNN网络搜索带卷中心椭圆，由于噪音影响，该椭圆存在一定误差
+        begin_time = time.perf_counter()
         self.ellipse_cnn = self.__center_by_net(frame, self.WINDOW_SIZE, init_ellipse)
+        print("cnn time = %d" % int((time.perf_counter() - begin_time) * 1000))
 
         # 刚开始跟踪带卷时，精度可能较差，先不做精细拟合处理
         if self.ellipse_cnn[0] > self.noise_filter_begin:
@@ -359,35 +367,43 @@ class CenterTracer(object):
 
         # 截取带卷中心附近子图，计算边缘，滤除内椭圆之外的边缘
         image = get_sub_image(frame, center=ellipse_mask, img_size=self.WINDOW_SIZE)
-        image = edge_image(image)
         filter_ellipse = (int(self.WINDOW_SIZE/2), int(self.WINDOW_SIZE/2), ellipse_mask[2], ellipse_mask[3], ellipse_mask[4])
         filter_range = (180, 430)  #(0, 360) if ellipse_mask[1] < 1340 else (180, 430)
         image = filter_around_ellipse(image, ellipse=filter_ellipse, range=filter_range)
 
         # 基于椭圆拟合计算带卷内椭圆
+        begin_time = time.perf_counter()
+        self.img_fitting = None
+        self.img_exp_fitting = None
         self.ellipse_fit = fit_ellipse(image, threshold=50)
         if self.ellipse_fit is not None:
             self.ellipse_fit = (self.ellipse_fit + 0.5).astype(np.int32)
             if SHOW_FITTING_ELLIPSE:
-                self.__show_ellipse(image, self.ellipse_fit, (0, 255, 0), "Ellipse fitting")
+                self.img_fitting = self.__show_ellipse(image, self.ellipse_fit, (0, 255, 0), "Ellipse fitting")
             self.ellipse_fit[0], self.ellipse_fit[1] = \
                 calc_original_pos(pos=self.ellipse_fit, img_size=self.WINDOW_SIZE, init_center=ellipse_mask)
+        print("fit time = %d" % int((time.perf_counter() - begin_time) * 1000))
 
         # 如果预期椭圆存在，则用该椭圆拟合带卷内椭圆
+        begin_time = time.perf_counter()
         if self.ellipse_exp is not None:
             ellipse_temp = (self.ellipse_exp[2], self.ellipse_exp[3], self.ellipse_exp[4], 0, 360, 3)
             self.ellipse_exp_fit = self.__fit_exp_ellipse(image, ellipse_temp)
             if self.ellipse_exp_fit is not None:
                 self.ellipse_exp_fit = np.array(self.ellipse_exp_fit)
                 if SHOW_FITTING_ELLIPSE:
-                    self.__show_ellipse(image, self.ellipse_exp_fit, (0, 255, 0), "Expected ellipse fitting")
+                    self.img_exp_fitting = self.__show_ellipse(image, self.ellipse_exp_fit, (0, 255, 0), "Expected ellipse fitting")
                 self.ellipse_exp_fit[0], self.ellipse_exp_fit[1] = \
                     calc_original_pos(pos=self.ellipse_exp_fit, img_size=self.WINDOW_SIZE, init_center=ellipse_mask)
+        print("exp fit time = %d" % int((time.perf_counter() - begin_time) * 1000))
 
         # 检测拟合结果，判断是否存在显著错误
         # 如果椭圆拟合失败，说明干扰过于明显
         if self.ellipse_fit is None:
             self.warning = WarningType.ellipse_fitting_failed
+
+        # 恢复原始图像
+        embed_sub_image(img=frame, sub_img=sub_img_cpy, center=init_ellipse)
 
         # 综合结果
         # 如果椭圆拟合失败，则采用CNN检测结果
@@ -429,10 +445,10 @@ class CenterTracer(object):
                                    ellipse_vision[2:5] * (1.0 - self.low_pass_k)
 
         # 内椭圆整形化，以便于显示
-        coil_ellipse = (self.ellipse_kalman + 0.5).astype(np.int32)
+        coil_ellipse = ellipse_vision if NO_KALMAN else (self.ellipse_kalman + 0.5).astype(np.int32)
         coil_movement = None
         if self.coil_ellipse is not None:
-            coil_movement = coil_ellipse - self.coil_ellipse
+            coil_movement = coil_ellipse[0:5] - self.coil_ellipse[0:5]
         self.coil_ellipse = coil_ellipse
 
         # 评估检测跟踪误差

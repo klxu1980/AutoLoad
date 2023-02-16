@@ -41,5 +41,10 @@ AIMING_END = end_keypoint[0]
 
 # 根据现场状况增加的参数
 TRACKING_BEGIN_X = 1800       # 带卷初始定位超过该位置时，进入到带卷跟踪状态
-
 RECORD_ROOT_PATH = "D:\\huada2#data"
+
+# 试验控制用全局参数
+CNN_SUB_IMAGE_CNT = 8
+SHOW_FITTING_ELLIPSE = True      # 显示椭圆拟合过程
+NO_KALMAN = True                 # 不使用卡尔曼滤波
+SCREEN_SHOT_IN_PIT = True        # 带卷到达基坑底部时自动截图

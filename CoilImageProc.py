@@ -94,25 +94,42 @@ def img_window(center, img_size):
     return left, top, right, bottom
 
 
-def get_sub_image(img, center, img_size):
+def sub_image_position(img, center, img_size):
     left, top, right, bottom = img_window(center, img_size)
 
+    sub_img = np.zeros((img_size, img_size), dtype=np.uint8)
+    sub_left = 0
+    sub_top = 0
+    sub_right = img_size
+    sub_bottom = img_size
+
     if left < 0:
-        right += -left
         left = 0
-    elif right > img.shape[1]:
-        left -= right - img.shape[1]
+        sub_left = -left
+    if right > img.shape[1]:
         right = img.shape[1]
-
+        sub_right = img_size - (right - img.shape[1])
     if top < 0:
-        bottom += -top
         top = 0
-    elif bottom > img.shape[0]:
-        top -= bottom - img.shape[0]
+        sub_top = -top
+    if bottom > img.shape[0]:
         bottom = img.shape[0]
+        sub_bottom = img_size - (bottom - img.shape[0])
 
-    sub_img = img[top: bottom, left: right]
+    return left, top, right, bottom, sub_left, sub_top, sub_right, sub_bottom
+
+
+def get_sub_image(img, center, img_size):
+    left, top, right, bottom, sub_left, sub_top, sub_right, sub_bottom = sub_image_position(img, center, img_size)
+
+    sub_img = np.zeros((img_size, img_size), dtype=np.uint8)
+    sub_img[sub_top: sub_bottom, sub_left: sub_right] = img[top: bottom, left: right]
     return sub_img
+
+
+def embed_sub_image(img, sub_img, center):
+    left, top, right, bottom, sub_left, sub_top, sub_right, sub_bottom = sub_image_position(img, center, sub_img.shape[0])
+    img[top: bottom, left: right] = sub_img[sub_top: sub_bottom, sub_left: sub_right]
 
 
 def trans_windows(init_center, x_range, y_range, step):
