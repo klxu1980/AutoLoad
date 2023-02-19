@@ -97,24 +97,23 @@ def img_window(center, img_size):
 def sub_image_position(img, center, img_size):
     left, top, right, bottom = img_window(center, img_size)
 
-    sub_img = np.zeros((img_size, img_size), dtype=np.uint8)
     sub_left = 0
     sub_top = 0
     sub_right = img_size
     sub_bottom = img_size
 
     if left < 0:
-        left = 0
         sub_left = -left
+        left = 0
     if right > img.shape[1]:
+        sub_right -= right - img.shape[1]
         right = img.shape[1]
-        sub_right = img_size - (right - img.shape[1])
     if top < 0:
-        top = 0
         sub_top = -top
+        top = 0
     if bottom > img.shape[0]:
-        bottom = img.shape[0]
         sub_bottom = img_size - (bottom - img.shape[0])
+        bottom = img.shape[0]
 
     return left, top, right, bottom, sub_left, sub_top, sub_right, sub_bottom
 
@@ -191,7 +190,7 @@ def fit_ellipse(image, threshold):
 def calc_original_pos(pos, img_size, init_center):
     x = pos[0] - img_size / 2 + init_center[0]
     y = pos[1] - img_size / 2 + init_center[1]
-    return x, y
+    return int(x), int(y)
 
 
 def extract_filename_params(file_name):

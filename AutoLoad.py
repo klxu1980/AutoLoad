@@ -12,7 +12,7 @@ from CenterTracer import *
 from CoilStatus import CoilOpenStatus
 from CoilStatus import CoilPosStatus
 from PLCComm import PLCComm
-#from HKCamera import HKCamera
+from HKCamera import HKCamera
 from CoilImageProc import *
 from TraceCSV import TraceCSV
 from FilePath import PYTHON_PATH
@@ -39,14 +39,17 @@ class CameraThread(threading.Thread):
         else:
             self.camera = None
             self.demo_video = VideoPlayer(demo_video_file)
-        self.paused = False
-        self.forward = False
-        self.backward = False
-        self.frame = None
-        self.refreshed = False
-        self.lock = threading.RLock()
-        self.event = threading.Event()
-        self.terminated = False
+
+        self.__lock = threading.RLock()
+        self.__event = threading.Event()
+        self.__terminated = False
+        self.__frame = None
+        self.__refreshed = False
+
+        self.paused = False        # 暂停
+        self.forward = False       # 视频前放
+        self.backward = False      # 视频倒放
+        self.frame_time = 0        # 获取一帧图像所花费的时间
 
     def __read_one_frame(self):
         frame = None
@@ -69,35 +72,37 @@ class CameraThread(threading.Thread):
         return frame
 
     def run(self):
-        self.event.set()
-        while not self.terminated:
-            if self.event.wait(timeout=0.1):
-                self.event.clear()
-                frame = self.__read_one_frame()
+        self.__event.set()
+        while not self.__terminated:
+            if self.__event.wait(timeout=0.1):
+                self.__event.clear()
 
-                self.lock.acquire()
-                self.frame = frame
-                self.refreshed = True
-                self.lock.release()
+                begin_time = time.perf_counter()
+                frame = self.__read_one_frame()
+                self.frame_time = int((time.perf_counter() - begin_time) * 1000)
+
+                self.__lock.acquire()
+                self.__frame = frame
+                self.__refreshed = True
+                self.__lock.release()
 
     def get_one_frame(self):
-        self.lock.acquire()
-        frame = self.frame
-        refreshed = self.refreshed
-        self.refreshed = False
-        self.lock.release()
+        self.__lock.acquire()
+        frame = self.__frame.copy() if self.__frame is not None else None
+        refreshed = self.__refreshed
+        self.__refreshed = False
+        self.__lock.release()
 
-        self.event.set()
+        self.__event.set()
         return frame, refreshed
 
     def close(self):
-        self.terminated = True
+        self.__terminated = True
         self.join()
 
 
 class AutoLoader(object):
-    def __init__(self, run_as_demo=True, run_as_monitor=False):
-        self.run_as_demo = run_as_demo
+    def __init__(self, run_as_monitor=False):
         self.run_as_monitor = run_as_monitor
 
         # 加载各个检测模型
@@ -127,8 +132,16 @@ class AutoLoader(object):
         self.video_raw = None      # 原始未处理图像视频
         self.video_proc = None     # 处理后的图像视频
 
+        # 各个阶段耗时
+        self.read_write_frame_time = 0
+        self.track_ctrl_time = 0
+        self.show_video_time = 0
+
     def __del__(self):
-        self.plc.close()
+        if self.plc is not None:
+            self.plc.close()
+        if self.camera is not None:
+            self.camera.close()
 
     def __load_models(self):
         # self.coil_tracker是核心跟踪器
@@ -149,12 +162,12 @@ class AutoLoader(object):
 
     def __init_hardwares(self):
         # 初始化并启动plc
-        self.plc = PLCComm(self.run_as_demo)
+        self.plc = PLCComm(RUN_AS_DEMO)
         self.plc.start()
 
         # 初始化摄像头
         # 在demo模式下，摄像头在每次开始新一个带卷视频时创建
-        if not self.run_as_demo:
+        if not RUN_AS_DEMO:
             try:
                 self.camera = CameraThread()
                 self.camera.start()
@@ -185,20 +198,22 @@ class AutoLoader(object):
             self.video_save = None
 
     def init_record(self, frame):
-        root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
-        if not os.path.exists(root_path):
-            os.makedirs(root_path)
+        self.record_root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
+        if not os.path.exists(self.record_root_path):
+            os.makedirs(self.record_root_path)
 
         time_string = datetime.datetime.now().strftime("%H-%M-%S")
-        root_path += "\\" + time_string
-        os.makedirs(root_path)
+        self.record_root_path += "\\" + time_string
+        os.makedirs(self.record_root_path)
 
         size = (frame.shape[1], frame.shape[0])
-        self.video_raw = cv2.VideoWriter(root_path + "\\" + time_string + "-original.mp4",
+        self.video_raw = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-original.mp4",
                                          cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        self.video_proc = cv2.VideoWriter(root_path + "\\" + time_string + "-processed.mp4",
+        self.video_proc = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-processed.mp4",
                                           cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        self.plc.new_csv_record(root_path + "\\" + time_string + "-csvdata.csv")
+        self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
+
+        self.snap_shot = True
 
         #self.csv = TraceCSV(file_name=file_path_name)
 
@@ -216,10 +231,12 @@ class AutoLoader(object):
         self.init_one_cycle()
         self.coil_tracker.restart_tracking()
         self.proc_start_time = time.perf_counter()
+        self.snap_shot = True
 
         while True:
             # 实际控制时，从摄像头中读取一帧。示例和测试时，从视频文件中读取一帧。
             # 摄像头读取的数据为灰度图，为了显示清晰，将用于显示的图像调整为彩色图
+            begin_time = time.perf_counter()
             frame_gray, new_frame = self.camera.get_one_frame()
             if not new_frame:
                 time.sleep(0.01)
@@ -229,10 +246,12 @@ class AutoLoader(object):
             frame_bgr = color_image(frame_gray)
 
             # 在现场实测时，一旦开始上卷，则记录原始视频
-            if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING and self.video_raw is not None:
+            if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING and self.video_raw is not None:
                 self.video_raw.write(frame_bgr)
+            self.read_write_frame_time = int((time.perf_counter() - begin_time) * 1000)
 
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
+            begin_time = time.perf_counter()
             self.track_one_frame(frame=frame_gray, plc=self.plc)
             self.car_ctrl()
 
@@ -240,14 +259,16 @@ class AutoLoader(object):
             if self.coil_tracker.coil_ellipse is not None:
                 self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
                 # 没有跟踪数据时上传什么??
+            self.track_ctrl_time = int((time.perf_counter() - begin_time) * 1000)
 
             # 显示控制信息和操作按钮
+            begin_time = time.perf_counter()
             text_top = self.show_old_loading_info(frame=frame_bgr, text_top=60)
             self.show_loading_info(frame=frame_bgr, text_top=text_top)
             self.show_key_operations(frame_bgr, text_top=text_top + 400)
 
             # 在现场实测时，一旦开始上卷，同时记录实际控制视频
-            if not self.run_as_demo and self.loading_stage != LoadStage.WAITING_4_LOADING:
+            if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING:
                 if self.video_proc is not None:
                     self.video_proc.write(frame_bgr)
                 self.plc.add_csv_record()
@@ -259,9 +280,12 @@ class AutoLoader(object):
                 self.csv.write_file()
 
             if self.coil_tracker.img_fitting is not None:
-                frame_bgr[0: 512, frame_bgr.shape[1] - 512: frame_bgr.shape[1]] = self.coil_tracker.img_fitting[:, :]
+                img = self.coil_tracker.img_fitting
+                frame_bgr[0: img.shape[0], frame_bgr.shape[1] - img.shape[1]: frame_bgr.shape[1]] = img[:, :]
             if self.coil_tracker.img_exp_fitting is not None:
-                frame_bgr[512: 512 * 2, frame_bgr.shape[1] - 512: frame_bgr.shape[1]] = self.coil_tracker.img_exp_fitting[:, :]
+                img = self.coil_tracker.img_exp_fitting
+                frame_bgr[img.shape[0]: img.shape[0] * 2, frame_bgr.shape[1] - img.shape[1]: frame_bgr.shape[1]] \
+                    = img[:, :]
 
             # 视频显示
             frame_resized = cv2.resize(frame_bgr,
@@ -269,24 +293,26 @@ class AutoLoader(object):
             cv2.imshow("control monitor", frame_resized)
 
             # 带卷到达基坑底部后截图
-            if SCREEN_SHOT_IN_PIT and self.coil_tracker.coil_ellipse[1] > 1500 and self.coil_tracker.coil_ellipse[0] < 1420:
-                self.show_text(frame_bgr, self.video_name, (20, 20))
-                cv2.imwrite("E:\\ScreenShot\\NoKalman\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
-                break
+            if SCREEN_SHOT_IN_PIT and not RUN_AS_DEMO and self.coil_tracker.coil_ellipse is not None and \
+                    self.coil_tracker.coil_ellipse[1] > 1500 and self.coil_tracker.coil_ellipse[0] < 1420 and \
+                    self.snap_shot:
+                cv2.imwrite(self.record_root_path + "\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
+                self.snap_shot = False
 
             # key operation
-            key = cv2.waitKeyEx(0 if self.camera.paused else 10)
+            key = cv2.waitKeyEx(0 if self.camera.paused else 1)
             if key == ord('R') or key == ord('r'):
                 cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
                 cv2.imwrite("E:\\ScreenShot\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
             elif key == ord('q') or key == ord('Q'):
                 break
             else:
-                self.key_operate_demo(key) if self.run_as_demo else self.key_operate_ctrl(key)
+                self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
+            self.show_video_time = int((time.perf_counter() - begin_time) * 1000)
 
     def show_key_operations(self, frame, text_top):
         row = text_top
-        if self.run_as_demo:
+        if RUN_AS_DEMO:
             self.show_text(frame, "P(p): pause", (20, row))
             row += 60
             self.show_text(frame, "->: move forward", (20, row))
@@ -375,10 +401,10 @@ class AutoLoader(object):
                 if not self.coil_tracker.coil_within_route:
                     self.coil_tracker.restart_tracking()
                 # 当带卷位置小于1800时，认为开始上卷
-                elif coil[0] < 1800:
+                elif plc.support_open and coil[0] < 1800:
                     self.loading_stage = LoadStage.MOVING_TO_UNPACKER
                     self.uploading_start_time = datetime.datetime.now()
-                    if not self.run_as_demo:
+                    if not RUN_AS_DEMO:
                         self.init_record(frame)
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             # 跟踪带卷位置
@@ -431,23 +457,27 @@ class AutoLoader(object):
         time_str = now.strftime("%Y-%m-%d, %H:%M:%S:") + ("%03d" % int(now.microsecond * 0.001))
         self.show_text(frame, time_str, (frame.shape[1] - 600, 40))
 
-        # 显示PLC状态信息
-        text_top += 40
-        if self.plc.connected:
-            plc_str = "PLC heartbeat: %d, car moving up: %d, down: %d, forward: %d, backward: %d. Support opened: %d" % \
-                      (self.plc.heartbeat, self.plc.car_up, self.plc.car_down, self.plc.car_forward,
-                       self.plc.car_backward, self.plc.support_open)
-            self.show_text(frame, plc_str, (20, text_top))
-            text_top += 40
+        # 显示检测跟踪算法的主要耗时
+        self.show_text(frame, "Time consumption", (20, text_top))
+        self.show_text(frame, "Camera: %d      Analyze: %4d" % (self.read_write_frame_time, self.coil_tracker.analyze_time),
+                       (20, text_top + 40))
+        self.show_text(frame, "Edge:   %4d     CNN:     %4d" % (self.coil_tracker.edge_time, self.coil_tracker.cnn_time),
+                       (20, text_top + 80))
+        self.show_text(frame, "Fit:    %4d     Fit exp: %4d    Offset: %4d" %
+                       (self.coil_tracker.fit_time, self.coil_tracker.fit_exp_time, self.coil_tracker.offset_time),
+                       (20, text_top + 120))
+        self.show_text(frame, "Track:   %4d    Show:    %4d" % (self.track_ctrl_time, self.show_video_time),
+                       (20, text_top + 160))
+        text_top += 200
 
         # 显示相机状态信息
-        if not self.run_as_demo and self.loading_stage != LoadStage.MOVING_TO_UNPACKER:
-            exp_time = self.camera.get_exposure_time()
-            self.show_text(frame, "Camera exposure time = %1.1fms" % (exp_time * 0.001), (20, text_top))
-            text_top += 40
+        # if not RUN_AS_DEMO and self.loading_stage != LoadStage.MOVING_TO_UNPACKER:
+        #     exp_time = self.camera.get_exposure_time()
+        #     self.show_text(frame, "Camera exposure time = %1.1fms" % (exp_time * 0.001), (20, text_top))
+        #     text_top += 40
 
         # demo状态下，显示视频总帧数和当前帧
-        if self.run_as_demo:
+        if RUN_AS_DEMO:
             self.show_text(frame, "Video frame count = %d, current frame = %d" %
                            (self.camera.demo_video.frame_cnt, self.camera.demo_video.cur_frame), (20, text_top))
             text_top += 40
@@ -637,13 +667,13 @@ def demo_test():
 
 
 def real_control():
-    auto_loader = AutoLoader(run_as_demo=False)
+    auto_loader = AutoLoader()
     auto_loader.coil_tracker.read_trace_stat("trace_stat.csv")
     auto_loader.control()
 
 
 if __name__ == '__main__':
-    demo_test()
-    # real_control()
-
-
+    if RUN_AS_DEMO:
+        demo_test()
+    else:
+        real_control()

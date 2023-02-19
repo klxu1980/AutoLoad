@@ -106,18 +106,6 @@ class CenterTracer(object):
         self.kalman_trace = list()          # 经过卡尔曼滤波后的轨迹
         self.vision_trace = list()          # 单纯由视觉产生的轨迹
 
-        # 各个主要功能的计算时间
-        self.edge_time = 0
-        self.cnn_time = 0         # CNN计算椭圆耗时
-        self.fit_time = 0         # 椭圆拟合耗时
-        self.fit_exp_time = 0     # 椭圆模板拟合耗时
-        self.offset_time = 0      # 帧之间偏移量计算时间
-        self.analyze_time = 0
-
-        offset = 16
-        self.x_offset = np.repeat(np.arange(-offset, offset, 1), offset * 2)
-        self.y_offset = np.tile(np.arange(-offset, offset, 1), offset * 2)
-
     @staticmethod
     def __init_network(image_size, output_size):
         network = CoilNet(img_size=image_size, output_size=output_size)
@@ -161,11 +149,10 @@ class CenterTracer(object):
 
         self.kalman.x = np.array([init_ellipse[0], 0, init_ellipse[1], 0])
 
-    def __center_by_net(self, frame, img_size, init_center):
-        begin_time = time.perf_counter()
-
+    def __center_by_net(self, frame, init_center):
         # 预先提取图像边缘以提高精度
         # 为了减小计算耗时，仅对目标附近的区域进行边缘提取
+        img_size = self.WINDOW_SIZE
         proc_image = get_sub_image(frame, center=init_center, img_size=img_size + 100)
 
         # a set of images are clipped around the init center, each one is used to obtain one center location
@@ -213,12 +200,9 @@ class CenterTracer(object):
         values[0] += init_center[0] - sub_center[0]
         values[1] += init_center[1] - sub_center[1]
 
-        # self.cnn_time = int((time.perf_counter() - begin_time) * 1000)
         return values
 
     def __offset_by_template(self, frame, lst_center):
-        begin_time = time.perf_counter()
-
         if self.lst_frame is None:
             self.lst_frame = frame
             return 0, 0
@@ -243,7 +227,6 @@ class CenterTracer(object):
         # 保存当前帧用于下一次差分计算
         self.lst_frame = frame
 
-        self.offset_time = int((time.perf_counter() - begin_time) * 1000)
         return off_x, off_y
 
     def __coil_on_top(self, coil_ellipse):
@@ -286,45 +269,24 @@ class CenterTracer(object):
             return None
 
     @staticmethod
-    def __get_ellipse_array(temp_size, ellipse_temp):
+    def __get_ellipse_array(ellipse_temp):
         """
         将椭圆每个像点的坐标转换到数组里
         这部分程序以后可以做一下优化
         :param ellipse_temp:
         :return:
         """
-        canvas = np.zeros((temp_size, temp_size), dtype=np.uint8)
-        cv2.ellipse(canvas, (int(temp_size / 2), int(temp_size / 2)), (ellipse_temp[0], ellipse_temp[1]),
+        canvas = np.zeros((512, 512), dtype=np.uint8)
+        cv2.ellipse(canvas, (256, 256), (ellipse_temp[0], ellipse_temp[1]),
                     ellipse_temp[2], ellipse_temp[3], ellipse_temp[4], 255,
                     ellipse_temp[5])
         ellipse = np.array(np.where(canvas > 0))
         return ellipse
 
-    def __fit_exp_ellipse_fast(self, image, ellipse_temp):
-        # 目前测试看，这个拟合算法不如之前的快
-        offset = 16
-        row_cnt = offset * offset * 4
-
-        ellipse = self.__get_ellipse_array(temp_size=image.shape[0], ellipse_temp=ellipse_temp)
-        x_idx = np.tile(ellipse[1], row_cnt).reshape((row_cnt, ellipse.shape[1]))
-        y_idx = np.tile(ellipse[0], row_cnt).reshape((row_cnt, ellipse.shape[1]))
-
-        x_idx += self.x_offset
-        y_idx += self.y_offset
-
-        img = image[y_idx, x_idx]
-        row_norm = np.linalg.norm(img, ord=2, axis=0)
-        max_row = np.argmax(row_norm)
-
-        x = self.x_offset[max_row]
-        y = self.y_offset[max_row]
-
-        ellipse = (x + int(image.shape[0] / 2), y + int(image.shape[1] / 2), ellipse_temp[0], ellipse_temp[1], ellipse_temp[2])
-        return ellipse
-
     def __fit_exp_ellipse(self, image, ellipse_temp):
         """
         找出预期椭圆最接近的位置
+        这里需要做优化!!!!!!!!!!!!!!!!!!!!!
         :param image:
         :param ellipse_temp:
         :return:
@@ -333,17 +295,44 @@ class CenterTracer(object):
         max_fitness = 0
         bst_center = None
 
-        begin_time = time.perf_counter()
-        ellipse = self.__get_ellipse_array(temp_size=image.shape[0], ellipse_temp=ellipse_temp)
+        # row_cnt = offset * offset * 4
+        #
+        # ellipse = self.__get_ellipse_array(ellipse_temp)
+        # x_idx = np.tile(ellipse[1], row_cnt).reshape((row_cnt, ellipse.shape[1]))
+        # y_idx = np.tile(ellipse[0], row_cnt).reshape((row_cnt, ellipse.shape[1]))
+        #
+        # x_offset = np.repeat(np.arange(-offset, offset, 1), offset * 2 * x_idx.shape[1]).reshape(x_idx.shape)
+        # y_offset = np.tile(np.arange(-offset, offset, 1), offset * 2)
+        # y_offset = np.repeat(y_offset, x_idx.shape[1]).reshape(y_idx.shape)
+        #
+        # x_idx += x_offset
+        # y_idx += y_offset
+        #
+        # img = image[x_idx, y_idx]
+        # row_norm = np.linalg.norm(img, ord=2, axis=1)
+        # max_row = np.argmax(row_norm)
+        #
+        # x = x_offset[max_row, 0]
+        # y = y_offset[max_row, 0]
+
+        # ellipse = (x + 256, y + 256, ellipse_temp[0], ellipse_temp[1], ellipse_temp[2])
+
+        ellipse = self.__get_ellipse_array(ellipse_temp)
+        max_x = np.max(ellipse[1])
+        min_x = np.min(ellipse[1])
+        max_y = np.max(ellipse[0])
+        min_y = np.min(ellipse[0])
         for x in range(-offset, offset):
             for y in range(-offset, offset):
+                if min_x + x < 0 or max_x + x >= image.shape[1] or min_y + y < 0 or max_y + y >= image.shape[0]:
+                    continue
+
                 fitness = np.sum(image[ellipse[0] + y, ellipse[1] + x] ** 2)
                 if fitness > max_fitness:
                     max_fitness = fitness
-                    bst_center = (x + int(image.shape[0] / 2), y + int(image.shape[0] / 2))
+                    bst_center = (x + int(image.shape[1] / 2), y + int(image.shape[0] / 2))
         if bst_center is not None:
             ellipse = (bst_center[0], bst_center[1], ellipse_temp[0], ellipse_temp[1], ellipse_temp[2])
-            # self.fit_exp_time = int((time.perf_counter() - begin_time) * 1000)
             return ellipse
         else:
             return None
@@ -363,9 +352,7 @@ class CenterTracer(object):
     @staticmethod
     def __show_ellipse(image, ellipse, color, caption):
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        cv2.ellipse(image, (ellipse[0], ellipse[1]), (ellipse[2], ellipse[3]), ellipse[4],
-                    ELLIPSE_ANGLE_RANGE[0] - ellipse[4], ELLIPSE_ANGLE_RANGE[1] - ellipse[4], color, 1)
-        # cv2.imshow(caption, image)
+        cv2.ellipse(image, (ellipse[0], ellipse[1]), (ellipse[2], ellipse[3]), ellipse[4], 0, 360, color, 1)
         return image
 
     def __calc_coil_inner_ellipse(self, frame, init_ellipse):
@@ -383,61 +370,57 @@ class CenterTracer(object):
         self.warning = WarningType.ok
 
         # 对带卷附近区域做边缘提取
-        begin_time = time.perf_counter()
-        sub_img_size = self.WINDOW_SIZE + 50
+        sub_img_size = self.WINDOW_SIZE + 100
         sub_img = get_sub_image(frame, center=init_ellipse, img_size=sub_img_size)
         sub_img_cpy = sub_img.copy()
         embed_sub_image(img=frame, sub_img=edge_image(sub_img), center=init_ellipse)
-        self.edge_time = int((time.perf_counter() - begin_time) * 1000)
 
         # 基于CNN网络搜索带卷中心椭圆，由于噪音影响，该椭圆存在一定误差
         begin_time = time.perf_counter()
-        self.ellipse_cnn = self.__center_by_net(frame, self.WINDOW_SIZE, init_ellipse)
-        self.cnn_time = int((time.perf_counter() - begin_time) * 1000)
+        self.ellipse_cnn = self.__center_by_net(frame, init_ellipse)
+        print("cnn time = %d" % int((time.perf_counter() - begin_time) * 1000))
 
         # 刚开始跟踪带卷时，精度可能较差，先不做精细拟合处理
         if self.ellipse_cnn[0] > self.noise_filter_begin:
             self.ellipse_vision = self.ellipse_cnn
             return self.ellipse_vision
 
-        # 找出该位置的的期望椭圆，计算椭圆掩膜，
-        begin_time = time.perf_counter()
+        # 找出该位置的的期望椭圆，计算椭圆掩膜，用于过滤掩膜之外的边缘图像
         self.ellipse_exp = self.__ellipse_expected(self.ellipse_cnn, neighbor=15)
         ellipse_mask = self.ellipse_exp if self.ellipse_exp is not None else self.ellipse_cnn
 
         # 截取带卷中心附近子图，计算边缘，滤除内椭圆之外的边缘
         image = get_sub_image(frame, center=ellipse_mask, img_size=sub_img_size)
-        filter_ellipse = (sub_img_size // 2, sub_img_size // 2, ellipse_mask[2], ellipse_mask[3], ellipse_mask[4])
-        image = filter_around_ellipse(image, ellipse=filter_ellipse, range=ELLIPSE_ANGLE_RANGE)
+        filter_ellipse = (int(sub_img_size/2), int(sub_img_size/2), ellipse_mask[2], ellipse_mask[3], ellipse_mask[4])
+        filter_range = (180, 430)  #(0, 360) if ellipse_mask[1] < 1340 else (180, 430)
+        image = filter_around_ellipse(image, ellipse=filter_ellipse, range=filter_range)
+        cv2.imshow("", image)
 
         # 基于椭圆拟合计算带卷内椭圆
+        begin_time = time.perf_counter()
         self.img_fitting = None
         self.img_exp_fitting = None
-        begin_time = time.perf_counter()
         self.ellipse_fit = fit_ellipse(image, threshold=50)
-        self.fit_time = (int(time.perf_counter() - begin_time) * 1000)
         if self.ellipse_fit is not None:
             self.ellipse_fit = (self.ellipse_fit + 0.5).astype(np.int32)
             if SHOW_FITTING_ELLIPSE:
                 self.img_fitting = self.__show_ellipse(image, self.ellipse_fit, (0, 255, 0), "Ellipse fitting")
             self.ellipse_fit[0], self.ellipse_fit[1] = \
                 calc_original_pos(pos=self.ellipse_fit, img_size=sub_img_size, init_center=ellipse_mask)
-        self.fit_time = int((time.perf_counter() - begin_time) * 1000)
+        print("fit time = %d" % int((time.perf_counter() - begin_time) * 1000))
 
         # 如果预期椭圆存在，则用该椭圆拟合带卷内椭圆
         begin_time = time.perf_counter()
         if self.ellipse_exp is not None:
-            ellipse_temp = (self.ellipse_exp[2], self.ellipse_exp[3], self.ellipse_exp[4],
-                            ELLIPSE_ANGLE_RANGE[0] - self.ellipse_exp[4], ELLIPSE_ANGLE_RANGE[1] - self.ellipse_exp[4], 3)
+            ellipse_temp = (self.ellipse_exp[2], self.ellipse_exp[3], self.ellipse_exp[4], 0, 360, 3)
             self.ellipse_exp_fit = self.__fit_exp_ellipse(image, ellipse_temp)
             if self.ellipse_exp_fit is not None:
                 self.ellipse_exp_fit = np.array(self.ellipse_exp_fit)
                 if SHOW_FITTING_ELLIPSE:
-                    self.img_exp_fitting = self.__show_ellipse(image, self.ellipse_exp_fit, (0, 255, 0),
-                                                               "Expected ellipse fitting")
-                # print(self.ellipse_exp_fit)
+                    self.img_exp_fitting = self.__show_ellipse(image, self.ellipse_exp_fit, (0, 255, 0), "Expected ellipse fitting")
                 self.ellipse_exp_fit[0], self.ellipse_exp_fit[1] = \
                     calc_original_pos(pos=self.ellipse_exp_fit, img_size=sub_img_size, init_center=ellipse_mask)
+        print("exp fit time = %d" % int((time.perf_counter() - begin_time) * 1000))
 
         # 检测拟合结果，判断是否存在显著错误
         # 如果椭圆拟合失败，说明干扰过于明显
@@ -446,7 +429,6 @@ class CenterTracer(object):
 
         # 恢复原始图像
         embed_sub_image(img=frame, sub_img=sub_img_cpy, center=init_ellipse)
-        self.fit_exp_time = int((time.perf_counter() - begin_time) * 1000)
 
         # 综合结果
         # 如果椭圆拟合失败，则采用CNN检测结果
@@ -597,16 +579,7 @@ class CenterTracer(object):
         self.proc_interval = time.perf_counter() - self.start_time
         self.start_time = time.perf_counter()
 
-        # 将各个主要功能耗时初始化为-1
-        self.edge_time = -1
-        self.offset_time = -1
-        self.cnn_time = -1
-        self.fit_time = -1
-        self.fit_exp_time = -1
-        self.analyze_time = -1
-
         # 分析图像
-        begin_time = time.perf_counter()
         if self.tracking_status == TrackingStatus.NO_COIL:
             if self.coil_exist.analyze_one_frame(frame):
                 self.tracking_status = TrackingStatus.LOCATING
@@ -629,7 +602,6 @@ class CenterTracer(object):
             else:
                 self.coil_within_route = self.__ellipse_within_bound(self.coil_ellipse)
 
-        self.analyze_time = int((time.perf_counter() - begin_time) * 1000)
         return self.coil_ellipse, self.tracking_status
 
     def show_trace(self, frame):
