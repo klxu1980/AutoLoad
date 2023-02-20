@@ -652,11 +652,11 @@ class CenterTracer(object):
                 lst_ellipse = ellipse
 
         # 显示差分计算区域
-        diff_center = (self.ellipse_kalman[0] + self.diff_offset[0], self.ellipse_kalman[1] + self.diff_offset[1])
-        cv2.rectangle(frame,
-                      (int(diff_center[0] - self.diff_size / 2), int(diff_center[1] - self.diff_size / 2)),
-                      (int(diff_center[0] + self.diff_size / 2), int(diff_center[1] + self.diff_size / 2)),
-                      (0, 0, 255), 2)
+        # diff_center = (self.ellipse_kalman[0] + self.diff_offset[0], self.ellipse_kalman[1] + self.diff_offset[1])
+        # cv2.rectangle(frame,
+        #               (int(diff_center[0] - self.diff_size / 2), int(diff_center[1] - self.diff_size / 2)),
+        #               (int(diff_center[0] + self.diff_size / 2), int(diff_center[1] + self.diff_size / 2)),
+        #               (0, 0, 255), 2)
 
 
 if __name__ == '__main__':

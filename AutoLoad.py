@@ -101,6 +101,76 @@ class CameraThread(threading.Thread):
         self.join()
 
 
+class ShowThread(threading.Thread):
+    def __init__(self):
+        threading.Thread.__init__(self)
+        self.__event = threading.Event()
+        self.__terminated = False
+        self.__frame_orig = None
+        self.__frame_proc = None
+        self.__video_orig = None
+        self.__video_proc = None
+        self.save_record = False
+        self.record_root_path = None
+
+    def __init_record(self, frame):
+        self.record_root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
+        if not os.path.exists(self.record_root_path):
+            os.makedirs(self.record_root_path)
+
+        time_string = datetime.datetime.now().strftime("%H-%M-%S")
+        self.record_root_path += "\\" + time_string
+        os.makedirs(self.record_root_path)
+
+        size = (frame.shape[1], frame.shape[0])
+        self.__video_orig = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-original.mp4",
+                                            cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        self.__video_proc = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-processed.mp4",
+                                            cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        # self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
+
+    def run(self):
+        self.__event.clear()
+        while not self.__terminated:
+            if not self.__event.wait(timeout=0.1):
+                continue
+            self.__event.clear()
+
+            if self.save_record:
+                if self.__video_orig is None:
+                    self.__init_record(self.__frame_proc)
+                self.__video_orig.write(color_image(self.__frame_orig))
+                self.__video_proc.write(self.__frame_proc)
+            else:
+                self.__video_orig = None
+                self.__video_proc = None
+
+            # 视频显示
+            frame_resized = cv2.resize(self.__frame_proc,
+                                       (SCREEN_WIDTH, SCREEN_WIDTH * self.__frame_proc.shape[0] // self.__frame_proc.shape[1]))
+            cv2.imshow("control monitor", frame_resized)
+
+            # key operation
+            cv2.waitKeyEx(10)
+            # key = cv2.waitKeyEx(0 if self.camera.paused else 1)
+            # if key == ord('R') or key == ord('r'):
+            #     cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
+            #     cv2.imwrite("E:\\ScreenShot\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
+            # elif key == ord('q') or key == ord('Q'):
+            #     break
+            # else:
+            #     self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
+
+    def show_frame(self, frame_orig, frame_proc):
+        self.__frame_orig = frame_orig.copy()
+        self.__frame_proc = frame_proc.copy()
+        self.__event.set()
+
+    def close(self):
+        self.__terminated = True
+        self.join()
+
+
 class AutoLoader(object):
     def __init__(self, run_as_monitor=False):
         self.run_as_monitor = run_as_monitor
@@ -110,6 +180,8 @@ class AutoLoader(object):
         self.coil_tracker.read_trace_stat("trace_stat.csv")
 
         # 初始化plc和摄像头硬件
+        self.plc = None
+        self.camera = None
         self.__init_hardwares()
 
         self.demo_video = None    # 当前的demo视频
@@ -137,10 +209,15 @@ class AutoLoader(object):
         self.track_ctrl_time = 0
         self.show_video_time = 0
 
+        self.show = ShowThread()
+        self.show.start()
+
     def __del__(self):
         if self.plc is not None:
             self.plc.close()
         if self.camera is not None:
+            self.camera.close()
+        if self.show is not None:
             self.camera.close()
 
     def __load_models(self):
@@ -197,26 +274,6 @@ class AutoLoader(object):
         else:
             self.video_save = None
 
-    def init_record(self, frame):
-        self.record_root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
-        if not os.path.exists(self.record_root_path):
-            os.makedirs(self.record_root_path)
-
-        time_string = datetime.datetime.now().strftime("%H-%M-%S")
-        self.record_root_path += "\\" + time_string
-        os.makedirs(self.record_root_path)
-
-        size = (frame.shape[1], frame.shape[0])
-        self.video_raw = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-original.mp4",
-                                         cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        self.video_proc = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-processed.mp4",
-                                          cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
-
-        self.snap_shot = True
-
-        #self.csv = TraceCSV(file_name=file_path_name)
-
     def record_raw_video(self, frame):
         if self.video_raw is None:
             self.init_record(frame)
@@ -243,11 +300,11 @@ class AutoLoader(object):
                 continue
             if frame_gray is None:
                 break
-            frame_bgr = color_image(frame_gray)
+            frame_proc = color_image(frame_gray)
 
             # 在现场实测时，一旦开始上卷，则记录原始视频
-            if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING and self.video_raw is not None:
-                self.video_raw.write(frame_bgr)
+            # if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING and self.video_raw is not None:
+            #     self.video_raw.write(frame_bgr)
             self.read_write_frame_time = int((time.perf_counter() - begin_time) * 1000)
 
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
@@ -255,7 +312,7 @@ class AutoLoader(object):
             self.track_one_frame(frame=frame_gray, plc=self.plc)
             self.car_ctrl()
 
-            # 向PLC写带卷位置
+            # 向PLC写带卷位置q
             if self.coil_tracker.coil_ellipse is not None:
                 self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
                 # 没有跟踪数据时上传什么??
@@ -263,14 +320,14 @@ class AutoLoader(object):
 
             # 显示控制信息和操作按钮
             begin_time = time.perf_counter()
-            text_top = self.show_old_loading_info(frame=frame_bgr, text_top=60)
-            self.show_loading_info(frame=frame_bgr, text_top=text_top)
-            self.show_key_operations(frame_bgr, text_top=text_top + 400)
+            text_top = self.show_old_loading_info(frame=frame_proc, text_top=60)
+            self.show_loading_info(frame=frame_proc, text_top=text_top)
+            self.show_key_operations(frame_proc, text_top=text_top + 400)
 
             # 在现场实测时，一旦开始上卷，同时记录实际控制视频
             if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING:
-                if self.video_proc is not None:
-                    self.video_proc.write(frame_bgr)
+                # if self.video_proc is not None:
+                #     self.video_proc.write(frame_bgr)
                 self.plc.add_csv_record()
 
             # 记录上卷期间带卷跟踪、PLC的状态
@@ -281,33 +338,35 @@ class AutoLoader(object):
 
             if self.coil_tracker.img_fitting is not None:
                 img = self.coil_tracker.img_fitting
-                frame_bgr[0: img.shape[0], frame_bgr.shape[1] - img.shape[1]: frame_bgr.shape[1]] = img[:, :]
+                frame_proc[0: img.shape[0], frame_proc.shape[1] - img.shape[1]: frame_proc.shape[1]] = img[:, :]
             if self.coil_tracker.img_exp_fitting is not None:
                 img = self.coil_tracker.img_exp_fitting
-                frame_bgr[img.shape[0]: img.shape[0] * 2, frame_bgr.shape[1] - img.shape[1]: frame_bgr.shape[1]] \
+                frame_proc[img.shape[0]: img.shape[0] * 2, frame_proc.shape[1] - img.shape[1]: frame_proc.shape[1]] \
                     = img[:, :]
 
-            # 视频显示
-            frame_resized = cv2.resize(frame_bgr,
-                                       (SCREEN_WIDTH, int(SCREEN_WIDTH * frame_bgr.shape[0] / frame_bgr.shape[1])))
-            cv2.imshow("control monitor", frame_resized)
+            if self.loading_stage != LoadStage.WAITING_4_LOADING:
+                self.show.save_record = True
+            else:
+                self.show.save_record = False
+                self.snap_shot = True
+            self.show.show_frame(frame_gray, frame_proc)
 
             # 带卷到达基坑底部后截图
             if SCREEN_SHOT_IN_PIT and not RUN_AS_DEMO and self.coil_tracker.coil_ellipse is not None and \
                     self.coil_tracker.coil_ellipse[1] > 1500 and self.coil_tracker.coil_ellipse[0] < 1420 and \
                     self.snap_shot:
-                cv2.imwrite(self.record_root_path + "\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
+                cv2.imwrite(self.show.record_root_path + "\\" + self.datetime_string() + "-processed.jpg", frame_proc)
                 self.snap_shot = False
 
-            # key operation
-            key = cv2.waitKeyEx(0 if self.camera.paused else 1)
-            if key == ord('R') or key == ord('r'):
-                cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
-                cv2.imwrite("E:\\ScreenShot\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
-            elif key == ord('q') or key == ord('Q'):
-                break
-            else:
-                self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
+            # # key operation
+            # key = cv2.waitKeyEx(0 if self.camera.paused else 1)
+            # if key == ord('R') or key == ord('r'):
+            #     cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
+            #     cv2.imwrite("E:\\ScreenShot\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
+            # elif key == ord('q') or key == ord('Q'):
+            #     break
+            # else:
+            #     self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
             self.show_video_time = int((time.perf_counter() - begin_time) * 1000)
 
     def show_key_operations(self, frame, text_top):
@@ -401,11 +460,9 @@ class AutoLoader(object):
                 if not self.coil_tracker.coil_within_route:
                     self.coil_tracker.restart_tracking()
                 # 当带卷位置小于1800时，认为开始上卷
-                elif plc.support_open and coil[0] < 1800:
+                elif coil[0] < 1800 and (RUN_AS_DEMO or plc.support_open):
                     self.loading_stage = LoadStage.MOVING_TO_UNPACKER
                     self.uploading_start_time = datetime.datetime.now()
-                    if not RUN_AS_DEMO:
-                        self.init_record(frame)
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             # 跟踪带卷位置
             # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
@@ -458,8 +515,11 @@ class AutoLoader(object):
         self.show_text(frame, time_str, (frame.shape[1] - 600, 40))
 
         # 显示检测跟踪算法的主要耗时
+        proc_time = int((time.perf_counter() - self.proc_start_time) * 1000)
+        self.proc_start_time = time.perf_counter()
+
         self.show_text(frame, "Time consumption", (20, text_top))
-        self.show_text(frame, "Camera: %d      Analyze: %4d" % (self.read_write_frame_time, self.coil_tracker.analyze_time),
+        self.show_text(frame, "Total   %4d     Camera: %4d" % (proc_time, self.read_write_frame_time),
                        (20, text_top + 40))
         self.show_text(frame, "Edge:   %4d     CNN:     %4d" % (self.coil_tracker.edge_time, self.coil_tracker.cnn_time),
                        (20, text_top + 80))
@@ -531,12 +591,6 @@ class AutoLoader(object):
         elif self.loading_stage == LoadStage.UNPACKING:
             status_str = "Opening the coil, " + "opened" if self.coil_open_status.status else "not opened"
         self.show_text(frame, status_str, (20, text_top))
-        text_top += 40
-
-        # 显示控制周期耗时
-        proc_time = (time.perf_counter() - self.proc_start_time) * 1000
-        self.proc_start_time = time.perf_counter()
-        self.show_text(frame, "Processing time = %6.2f ms" % proc_time, (20, text_top))
         text_top += 40
 
         return text_top
