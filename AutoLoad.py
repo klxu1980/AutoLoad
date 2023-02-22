@@ -171,25 +171,116 @@ class ShowThread(threading.Thread):
         self.join()
 
 
-class AutoLoader(object):
-    def __init__(self, run_as_monitor=False):
-        self.run_as_monitor = run_as_monitor
+class AutoLoadThread(threading.Thread):
+    def __init__(self):
+        threading.Thread.__init__(self)
+        self.__terminated = False
+        self.__frame_gray = None
+        self.__event = threading.Event()
 
         # 加载各个检测模型
         self.__load_models()
         self.coil_tracker.read_trace_stat("trace_stat.csv")
+
+        self.loading_stage = LoadStage.WAITING_4_LOADING  # 自动上卷的各个阶段
+        self.uploading_start_time = None                  # 上卷开始时间
+        self.proc_start_time = 0.0                        # 本次控制周期开始时间
+
+        # 各个阶段耗时
+        self.read_write_frame_time = 0
+        self.track_ctrl_time = 0
+        self.show_video_time = 0
+
+    def close(self):
+        self.__terminated = True
+        self.join()
+
+    def __load_models(self):
+        # self.coil_tracker是核心跟踪器
+        self.coil_tracker = CenterTracer()
+        self.coil_tracker.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
+        self.coil_tracker.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
+        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-02-10-19-37.pt")    # 鞍座检测器，判断带卷是否在鞍座上
+
+        # 上卷检测器
+        self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
+        self.coil_pos_status.init_model()
+        self.coil_pos_status.load_model(PYTHON_PATH + "上卷检测2020-10-24-16-30.pt")
+
+        # 开卷检测器
+        self.coil_open_status = CoilOpenStatus(src_size=1200, src_position=(0, 800))
+        self.coil_open_status.init_model()
+        self.coil_open_status.load_model(PYTHON_PATH + "开卷检测2020-10-24-12-12.pt")
+
+    def __track_one_frame(self, frame, plc):
+        # 在监视模式下，上卷终止有可能判断错误，导致始终处于上卷状态
+        # 因此，判断上卷开始后，开始计时，如果3分钟内还没有结束，则强制进入等待上卷状态
+        if self.uploading_start_time is not None and (datetime.datetime.now() - self.uploading_start_time).seconds > 600:
+            self.loading_stage = LoadStage.WAITING_4_LOADING
+            self.coil_tracker.restart_tracking()
+
+        # 目前带卷跟踪仅用于监视带卷位置
+        # 带卷跟踪有4个阶段：
+        # 1. 等待上卷：带卷位于堆料区(也可能没有带卷)，等待上卷。首先检测判断堆料区是否有带卷(self.coil_tracker.coil_exist)，
+        #    之后检测带卷的初始位置(self.coil_tracker.coil_locator)。
+        if self.loading_stage == LoadStage.WAITING_4_LOADING:
+            # 检测跟踪带卷
+            # 如果带卷已经跟踪上，但是位置超出正常路径范围，则要求coil_tracker重新定位跟踪带卷
+            # 如果带卷到达上卷初始位置，且开卷机打开，则进入上卷状态
+            coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
+            if status == TrackingStatus.TRACKING and coil is not None:
+                if not self.coil_tracker.coil_within_route:
+                    self.coil_tracker.restart_tracking()
+                # 当带卷位置小于1800时，认为开始上卷
+                elif coil[0] < TRACKING_BEGIN_X and (RUN_AS_DEMO or plc.support_open):
+                    self.loading_stage = LoadStage.MOVING_TO_UNPACKER
+                    self.uploading_start_time = datetime.datetime.now()
+        elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
+            # 跟踪带卷位置
+            # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
+            # 如果带卷位置小于上卷终止位置，则进入下一阶段，检测带卷是否已装入开卷机
+            coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
+            if status != TrackingStatus.TRACKING:
+                self.loading_stage = LoadStage.WAITING_4_LOADING
+                # 注意，这里要告警！！！！
+            elif coil[0] < end_keypoint[0]:
+                self.loading_stage = LoadStage.INTO_UNPACKER
+                self.coil_tracker.restart_tracking()
+        elif self.loading_stage == LoadStage.INTO_UNPACKER:
+            if self.coil_pos_status.analyze_one_frame(frame):
+                self.loading_stage = LoadStage.UNPACKING
+        elif self.loading_stage == LoadStage.UNPACKING:
+            if self.coil_open_status.analyze_one_frame(frame):
+                self.loading_stage = LoadStage.WAITING_4_LOADING
+
+    def run(self):
+        while not self.__terminated:
+            # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
+            begin_time = time.perf_counter()
+            self.__track_one_frame(frame=self.__frame_gray, plc=self.plc)
+            self.car_ctrl()
+
+            # 向PLC写带卷位置q
+            if self.coil_tracker.coil_ellipse is not None:
+                self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
+                # 没有跟踪数据时上传什么??
+            self.track_ctrl_time = int((time.perf_counter() - begin_time) * 1000)
+
+    def analyze_one_frame(self, frame):
+        
+
+
+class AutoLoader(object):
+    def __init__(self, run_as_monitor=False):
+        self.run_as_monitor = run_as_monitor
 
         # 初始化plc和摄像头硬件
         self.plc = None
         self.camera = None
         self.__init_hardwares()
 
-        self.demo_video = None    # 当前的demo视频
-        self.uploading_start_time = None  # 上卷开始时间
-
-        # 以下变量主要在demo中使用到
-        self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
-        self.proc_start_time = 0.0                           # 本次控制周期开始时间
+        # 建立跟踪线程
+        self.__loader = AutoLoadThread()
 
         # 试验测试中，如果需要存储每个视频的带卷轨迹数据，则设置save_trace=True
         # 正常现场测试时，默认存储带卷轨迹
@@ -220,23 +311,6 @@ class AutoLoader(object):
         if self.show is not None:
             self.camera.close()
 
-    def __load_models(self):
-        # self.coil_tracker是核心跟踪器
-        self.coil_tracker = CenterTracer()
-        self.coil_tracker.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
-        self.coil_tracker.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
-        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-02-10-19-37.pt")    # 鞍座检测器，判断带卷是否在鞍座上
-
-        # 上卷检测器
-        self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
-        self.coil_pos_status.init_model()
-        self.coil_pos_status.load_model(PYTHON_PATH + "上卷检测2020-10-24-16-30.pt")
-
-        # 开卷检测器
-        self.coil_open_status = CoilOpenStatus(src_size=1200, src_position=(0, 800))
-        self.coil_open_status.init_model()
-        self.coil_open_status.load_model(PYTHON_PATH + "开卷检测2020-10-24-12-12.pt")
-
     def __init_hardwares(self):
         # 初始化并启动plc
         self.plc = PLCComm(RUN_AS_DEMO)
@@ -262,27 +336,26 @@ class AutoLoader(object):
     def show_text(image, text, pos, color=(0, 255, 0)):
         cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
-    def save_video(self, frame):
-        if self.saving_video:
-            if self.video_save is None:
-                datetime_str = self.datetime_string()
-                size = (frame.shape[1], frame.shape[0])
-                self.video_save = cv2.VideoWriter(self.default_saving_path + datetime_str + ".mp4",
-                                                  cv2.VideoWriter_fourcc(*'MP4V'), 10, size)
-            self.video_save.write(frame)
-            self.show_text(frame, "recording video", pos=(600, 40), color=(0, 0, 255))
-        else:
-            self.video_save = None
+    def __init_record(self, frame):
+        """
+        初始化测试记录，包括原始视频、跟踪处理视频，以及csv数据
+        :param frame:
+        :return:
+        """
+        self.record_root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
+        if not os.path.exists(self.record_root_path):
+            os.makedirs(self.record_root_path)
 
-    def record_raw_video(self, frame):
-        if self.video_raw is None:
-            self.init_record(frame)
-        self.video_raw.write(frame)
+        time_string = datetime.datetime.now().strftime("%H-%M-%S")
+        self.record_root_path += "\\" + time_string
+        os.makedirs(self.record_root_path)
 
-    def record_proc_video(self, frame):
-        if self.video_proc is None:
-            self.init_record(frame)
-        self.video_proc.write(frame)
+        size = (frame.shape[1], frame.shape[0])
+        self.__video_orig = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-original.mp4",
+                                            cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        self.__video_proc = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-processed.mp4",
+                                            cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
+        # self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
 
     def control(self):
         self.init_one_cycle()
@@ -368,6 +441,42 @@ class AutoLoader(object):
             # else:
             #     self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
             self.show_video_time = int((time.perf_counter() - begin_time) * 1000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def save_video(self, frame):
+        if self.saving_video:
+            if self.video_save is None:
+                datetime_str = self.datetime_string()
+                size = (frame.shape[1], frame.shape[0])
+                self.video_save = cv2.VideoWriter(self.default_saving_path + datetime_str + ".mp4",
+                                                  cv2.VideoWriter_fourcc(*'MP4V'), 10, size)
+            self.video_save.write(frame)
+            self.show_text(frame, "recording video", pos=(600, 40), color=(0, 0, 255))
+        else:
+            self.video_save = None
+
+    def record_raw_video(self, frame):
+        if self.video_raw is None:
+            self.init_record(frame)
+        self.video_raw.write(frame)
+
+    def record_proc_video(self, frame):
+        if self.video_proc is None:
+            self.init_record(frame)
+        self.video_proc.write(frame)
+
+
 
     def show_key_operations(self, frame, text_top):
         row = text_top
