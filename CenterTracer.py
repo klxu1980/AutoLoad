@@ -77,7 +77,7 @@ class CenterTracer(object):
         self.noise_filter_begin = 1800     # 开始滤波范围，当带卷中心x坐标小于该值时，开始滤波
         self.exp_ellipse = None            # 当前位置预期的椭圆参数字典
         self.lst_ellipses = None           # 前一周期的椭圆
-        self.low_pass_k = 0.7              # 椭圆参数滤波系数
+        self.low_pass_k = 0.5              # 椭圆参数滤波系数
 
         self.ellipse_exp = None            # 当前位置预期的内椭圆
         self.ellipse_cnn = None            # 基于CNN计算得到的内椭圆
@@ -483,12 +483,16 @@ class CenterTracer(object):
                 oy = oy_car * self.car_confidence + oy * (1.0 - self.car_confidence)
 
         # kalman filter
-        self.ellipse_kalman[0:2] = self.__kalman_filter(ellipse_vision, (ox, oy))
-        self.ellipse_kalman[2:5] = self.ellipse_kalman[2:5] * self.low_pass_k + \
-                                   ellipse_vision[2:5] * (1.0 - self.low_pass_k)
+        if NO_KALMAN:
+            self.ellipse_kalman = ellipse_vision * self.low_pass_k + ellipse_vision * (1.0 - self.low_pass_k)
+        else:
+            self.ellipse_kalman[0:2] = self.__kalman_filter(ellipse_vision, (ox, oy))
+            self.ellipse_kalman[2:5] = self.ellipse_kalman[2:5] * self.low_pass_k + \
+                                       ellipse_vision[2:5] * (1.0 - self.low_pass_k)
 
         # 内椭圆整形化，以便于显示
-        coil_ellipse = ellipse_vision if NO_KALMAN else (self.ellipse_kalman + 0.5).astype(np.int32)
+        # coil_ellipse = ellipse_vision if NO_KALMAN else (self.ellipse_kalman + 0.5).astype(np.int32)
+        coil_ellipse = (self.ellipse_kalman + 0.5).astype(np.int32)
         coil_movement = None
         if self.coil_ellipse is not None:
             coil_movement = coil_ellipse[0:5] - self.coil_ellipse[0:5]

@@ -102,16 +102,19 @@ class CameraThread(threading.Thread):
 
 
 class ShowThread(threading.Thread):
-    def __init__(self):
+    def __init__(self, loader, plc):
         threading.Thread.__init__(self)
         self.__event = threading.Event()
+        self.__loader = loader
+        self.__plc = plc
         self.__terminated = False
         self.__frame_orig = None
         self.__frame_proc = None
         self.__video_orig = None
         self.__video_proc = None
-        self.save_record = False
-        self.record_root_path = None
+        self.save_record = False          # 是否存储视频和csv记录
+        self.record_root_path = None      # 当前记录路径
+        self.key_input = 0                # 窗口按键
 
     def __init_record(self, frame):
         self.record_root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
@@ -129,12 +132,233 @@ class ShowThread(threading.Thread):
                                             cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
         # self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
 
+    @staticmethod
+    def __show_text(image, text, pos, color=(0, 255, 0)):
+        cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+
+    @staticmethod
+    def __draw_lines(frame):
+        cv2.line(frame, PitMarkL1P1, PitMarkL1P2, (0, 255, 255), 8)
+        cv2.line(frame, PitMarkL2P1, PitMarkL2P2, (0, 255, 255), 8)
+        cv2.line(frame, PitMarkL3P1, PitMarkL3P2, (0, 255, 255), 8)
+
+        # 画出三条轨迹线
+        cv2.line(frame, coil_trans_begin, coil_fall_begin, (0, 255, 255), 2)
+        # cv2.line(frame, coil_trans_begin1, coil_fall_begin1, (0, 255, 255), 2)
+        cv2.line(frame, coil_fall_begin, alignment_keypoint, (0, 255, 255), 2)
+        cv2.line(frame, alignment_keypoint, end_keypoint, (0, 255, 255), 2)
+
+        # 画出平移阶段区间线
+        cv2.line(frame, stage1_up1, stage1_up2, (20, 20, 255), 2)
+        cv2.line(frame, stage1_down1, stage1_down2, (20, 20, 255), 2)
+
+        # 画出下降阶段区间线
+        cv2.line(frame, stage2_left1, stage2_left2, (20, 20, 255), 2)
+        cv2.line(frame, stage2_right1, stage2_right2, (20, 20, 255), 2)
+
+        cv2.line(frame, stage3_up1, stage3_up2, (20, 20, 255), 2)
+        cv2.line(frame, stage3_down1, stage3_down2, (20, 20, 255), 2)
+
+    @staticmethod
+    def __show_key_operations(frame, text_top):
+        row = text_top
+        if RUN_AS_DEMO:
+            ShowThread.__show_text(frame, "P(p): pause", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "->: move forward", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "<-: move backward", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "S(s): start tracing and recording", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "E(e): stop tracing and recording", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "R(r): save current picture", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "L(l): detect if the coil is loaded", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "O(o): detect if the coil is opened", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "g(G): show coil edge", (20, row))
+            row += 60
+        else:
+            ShowThread.__show_text(frame, "R(r): save current picture", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "s(S): manually start", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "E(e): manually stop", (20, row))
+            row += 60
+            ShowThread.__show_text(frame, "F(f): show edge", (20, row))
+            row += 60
+        ShowThread.__show_text(frame, "Q(q): quit", (20, row))
+        row += 60
+        return row
+
+    def __draw_fitting(self, frame):
+        img = self.__loader.coil_tracker.img_fitting
+        if img is not None:
+            frame[0: img.shape[0], frame.shape[1] - img.shape[1]: frame.shape[1]] = img[:, :]
+
+        img = self.__loader.coil_tracker.img_exp_fitting
+        if img is not None:
+            frame[img.shape[0]: img.shape[0] * 2, frame.shape[1] - img.shape[1]: frame.shape[1]] = img[:, :]
+
+    def __draw_coil_trace(self, frame):
+        if self.__loader.coil_tracker.coil_ellipse is None:
+            return
+
+        ellipse = self.__loader.coil_tracker.coil_ellipse
+        cv2.ellipse(frame, (ellipse[0], ellipse[1]), (ellipse[2], ellipse[3]), ellipse[4], 0, 360, (0, 255, 0), 2)
+
+        # show center moving trace
+        if len(self.__loader.coil_tracker.kalman_trace) > 0:
+            lst_ellipse = self.__loader.coil_tracker.kalman_trace[0]
+            for _, ellipse in enumerate(self.__loader.coil_tracker.kalman_trace):
+                p1 = (lst_ellipse[0], lst_ellipse[1])
+                p2 = (ellipse[0], ellipse[1])
+                cv2.line(frame, p1, p2, (0, 255, 0), 2)
+                lst_ellipse = ellipse
+
+    def __draw_histgram(self, orig_frame, proc_frame, top):
+        # 显示带卷中心附近图像的直方图
+        if self.__loader.coil_tracker.coil_ellipse is not None:
+            center = self.__loader.coil_tracker.coil_ellipse
+            if center is not None:
+                image = orig_frame[center[1] - 256: center[1] + 256, center[0] - 256: center[0] + 256]
+                _, dist = image_histogram(image)
+                hist_img = color_image(draw_histogram(dist))
+                proc_frame[top: top + hist_img.shape[0], 20: 20 + hist_img.shape[1]] = hist_img[:, :]
+        return top + 100 + 60
+
+    def __show_old_loading_info(self, frame, text_top):
+        self.__show_text(frame, "Mode0:", (20, text_top + 40), (20, 255, 255))
+        self.__show_text(frame, "Rbt :", (20, text_top + 90), (20, 255, 255))
+        self.__show_text(frame, "%", (240, text_top + 90), (20, 255, 255))
+
+        # 小车行动命令
+        self.__show_text(frame, "In  : %d" % self.__plc.car_forward , (20, text_top + 140), (20, 255, 255))
+        self.__show_text(frame, "Out : %d" % self.__plc.car_backward, (20, text_top + 190), (20, 255, 255))
+        self.__show_text(frame, "Up  : %d" % self.__plc.car_up,       (20, text_top + 240), (20, 255, 255))
+        self.__show_text(frame, "Down: %d" % self.__plc.car_down,     (20, text_top + 290), (20, 255, 255))
+
+        # 卷筒状态: 1：涨径; 0：缩径
+        self.__show_text(frame, "Expand: %d" % self.__plc.PayoffCoilBlock_Expand, (300, text_top + 40), (20, 255, 255))
+
+        # 压辊状态: 1：压下; 0：抬起
+        self.__show_text(frame, "jamroll: %d" % self.__plc.JammingRoll_State, (300, text_top + 90), (20, 255, 255))
+
+        # 支撑状态: 1：打开; 0：关闭
+        self.__show_text(frame, "support: %d" % self.__plc.PayoffSupport_Open, (300, text_top + 140), (20, 255, 255))
+
+        # 导板状态: 1：抬起; 0：放下
+        self.__show_text(frame, "board  : %d" % self.__plc.GuideBoard_Up, (300, text_top + 190), (20, 255, 255))
+
+        # 卷筒旋转: 1：正转; 2：反转; 0：不动
+        if self.__plc.Payoff_PositiveRun:
+            self.__show_text(frame, "block  : 1", (300, text_top + 240), (20, 255, 255))
+        elif self.__plc.Payoff_NegativeRun:
+            self.__show_text(frame, "block  : 2", (300, text_top + 240), (20, 255, 255))
+        else:
+            self.__show_text(frame, "block  : 0", (300, text_top + 240), (20, 255, 255))
+
+        # 导板伸缩: 1：伸出; 0：缩回
+        self.__show_text(frame, "tongue : %d" % self.__plc.GuideBoard_Extend, (300, text_top + 290), (20, 255, 255))
+
+        # 内径圆圆心坐标
+        ellipse = self.__loader.coil_tracker.coil_ellipse
+        if ellipse is not None:
+            self.__show_text(frame, "x: %d" % ellipse[0], (20, text_top + 360), (20, 255, 255))
+            self.__show_text(frame, "y: %d" % ellipse[1], (300, text_top + 360), (20, 255, 255))
+            """
+            # 模糊度百分比
+            self.__show_text(frame, to_string(D.definition_rate), (2900, 1970), (20, 255, 255))
+            self.__show_text(frame, "%", (3000, 1970), (20, 255, 255))
+            """
+
+        return text_top + 360 + 50
+
+    def __show_tracking_error(self,frame, text_top):
+        status_str = "Tracking error: ellipse error = %5.1f, movement error = %5.1f" % \
+                     (self.__loader.coil_tracker.err_ellipse * 100.0, self.__loader.coil_tracker.err_movement * 100.0)
+        self.__show_text(frame, status_str, (20, text_top), (20, 255, 255))
+        return text_top + 40
+
+    def __show_tracking_info(self, frame, text_top):
+        # demo状态下，显示视频总帧数和当前帧
+        # if RUN_AS_DEMO:
+        #     self.show_text(frame, "Video frame count = %d, current frame = %d" %
+        #                    (self.camera.demo_video.frame_cnt, self.camera.demo_video.cur_frame), (20, text_top))
+        #     text_top += 40
+
+        # 正在跟踪带卷，显示跟踪状态信息
+        status_str = "Tracking status: "
+        if self.__loader.coil_tracker.tracking_status == TrackingStatus.TRACKING:
+            status_str += "Tracking"
+        elif self.__loader.coil_tracker.tracking_status == TrackingStatus.NO_COIL:
+            status_str = "No coil"
+        elif self.__loader.coil_tracker.tracking_status == TrackingStatus.LOCATING:
+            status_str = "Initializing coil center"
+            init_center = self.__loader.coil_tracker.coil_locator.center
+            if init_center is not None:
+                cv2.circle(frame, center=(init_center[0], init_center[1]), radius=5, color=(0, 0, 255), thickness=2)
+        self.__show_text(frame, status_str, (20, text_top))
+        text_top += 40
+
+        return text_top
+
+    def __show_proc_time(self, frame, text_top):
+        loader = self.__loader
+        self.__show_text(frame, "Time consumption", (20, text_top))
+        self.__show_text(frame, "Total   %4d     Camera: %4d" % (0, loader.read_write_frame_time),
+                       (20, text_top + 40))
+        self.__show_text(frame, "Edge:   %4d     CNN:     %4d" %
+                         (loader.coil_tracker.edge_time, loader.coil_tracker.cnn_time), (20, text_top + 80))
+        self.__show_text(frame, "Fit:    %4d     Fit exp: %4d    Offset: %4d" %
+                       (self.__loader.coil_tracker.fit_time, loader.coil_tracker.fit_exp_time, loader.coil_tracker.offset_time),
+                       (20, text_top + 120))
+        self.__show_text(frame, "Track:   %4d    Show:    %4d" %
+                         (loader.track_ctrl_time, loader.show_video_time), (20, text_top + 160))
+        text_top += 200
+        return text_top
+
+    def __show_loading_status(self, frame, text_top):
+        status_str = "Loading status: "
+        if self.__loader.loading_stage == LoadStage.WAITING_4_LOADING:
+            # 在图像上显示带卷中心位置
+            status_str += "Waiting to be loaded"
+        elif self.__loader.loading_stage == LoadStage.MOVING_TO_UNPACKER:
+            status_str += "Moving to the unpacker"
+        elif self.__loader.loading_stage == LoadStage.INTO_UNPACKER:
+            status_str += "Loading to the unpacker, " + ("loaded" if self.__loader.coil_pos_status.status else "not loaded")
+        elif self.__loader.loading_stage == LoadStage.UNPACKING:
+            status_str += "Opening the coil, " + "opened" if self.__loader.coil_open_status.status else "not opened"
+        self.__show_text(frame, status_str, (20, text_top))
+        return text_top + 40
+
     def run(self):
         self.__event.clear()
         while not self.__terminated:
             if not self.__event.wait(timeout=0.1):
                 continue
             self.__event.clear()
+
+            # 显示当前时间
+            now = datetime.datetime.now()
+            time_str = now.strftime("%Y-%m-%d, %H:%M:%S:") + ("%03d" % int(now.microsecond * 0.001))
+            self.__show_text(self.__frame_proc, time_str, (20, 40))
+
+            text_top = 80
+            text_top = self.__show_old_loading_info(self.__frame_proc, text_top)
+            text_top = self.__show_tracking_error(self.__frame_proc, text_top)
+            text_top = self.__show_proc_time(self.__frame_proc, text_top)
+            text_top = self.__show_tracking_info(self.__frame_proc, text_top)
+            text_top = self.__show_loading_status(self.__frame_proc, text_top)
+            text_top = self.__draw_histgram(self.__frame_orig, self.__frame_proc, text_top)
+            self.__show_key_operations(self.__frame_proc, text_top)
+
+            self.__draw_coil_trace(self.__frame_proc)
+            self.__draw_lines(self.__frame_proc)
+            self.__draw_fitting(self.__frame_proc)
 
             if self.save_record:
                 if self.__video_orig is None:
@@ -151,15 +375,7 @@ class ShowThread(threading.Thread):
             cv2.imshow("control monitor", frame_resized)
 
             # key operation
-            cv2.waitKeyEx(10)
-            # key = cv2.waitKeyEx(0 if self.camera.paused else 1)
-            # if key == ord('R') or key == ord('r'):
-            #     cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
-            #     cv2.imwrite("E:\\ScreenShot\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
-            # elif key == ord('q') or key == ord('Q'):
-            #     break
-            # else:
-            #     self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
+            self.key_input = cv2.waitKeyEx(10)
 
     def show_frame(self, frame_orig, frame_proc):
         self.__frame_orig = frame_orig.copy()
@@ -171,116 +387,25 @@ class ShowThread(threading.Thread):
         self.join()
 
 
-class AutoLoadThread(threading.Thread):
-    def __init__(self):
-        threading.Thread.__init__(self)
-        self.__terminated = False
-        self.__frame_gray = None
-        self.__event = threading.Event()
+class AutoLoader(object):
+    def __init__(self, run_as_monitor=False):
+        self.run_as_monitor = run_as_monitor
 
         # 加载各个检测模型
         self.__load_models()
         self.coil_tracker.read_trace_stat("trace_stat.csv")
-
-        self.loading_stage = LoadStage.WAITING_4_LOADING  # 自动上卷的各个阶段
-        self.uploading_start_time = None                  # 上卷开始时间
-        self.proc_start_time = 0.0                        # 本次控制周期开始时间
-
-        # 各个阶段耗时
-        self.read_write_frame_time = 0
-        self.track_ctrl_time = 0
-        self.show_video_time = 0
-
-    def close(self):
-        self.__terminated = True
-        self.join()
-
-    def __load_models(self):
-        # self.coil_tracker是核心跟踪器
-        self.coil_tracker = CenterTracer()
-        self.coil_tracker.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
-        self.coil_tracker.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
-        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-02-10-19-37.pt")    # 鞍座检测器，判断带卷是否在鞍座上
-
-        # 上卷检测器
-        self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
-        self.coil_pos_status.init_model()
-        self.coil_pos_status.load_model(PYTHON_PATH + "上卷检测2020-10-24-16-30.pt")
-
-        # 开卷检测器
-        self.coil_open_status = CoilOpenStatus(src_size=1200, src_position=(0, 800))
-        self.coil_open_status.init_model()
-        self.coil_open_status.load_model(PYTHON_PATH + "开卷检测2020-10-24-12-12.pt")
-
-    def __track_one_frame(self, frame, plc):
-        # 在监视模式下，上卷终止有可能判断错误，导致始终处于上卷状态
-        # 因此，判断上卷开始后，开始计时，如果3分钟内还没有结束，则强制进入等待上卷状态
-        if self.uploading_start_time is not None and (datetime.datetime.now() - self.uploading_start_time).seconds > 600:
-            self.loading_stage = LoadStage.WAITING_4_LOADING
-            self.coil_tracker.restart_tracking()
-
-        # 目前带卷跟踪仅用于监视带卷位置
-        # 带卷跟踪有4个阶段：
-        # 1. 等待上卷：带卷位于堆料区(也可能没有带卷)，等待上卷。首先检测判断堆料区是否有带卷(self.coil_tracker.coil_exist)，
-        #    之后检测带卷的初始位置(self.coil_tracker.coil_locator)。
-        if self.loading_stage == LoadStage.WAITING_4_LOADING:
-            # 检测跟踪带卷
-            # 如果带卷已经跟踪上，但是位置超出正常路径范围，则要求coil_tracker重新定位跟踪带卷
-            # 如果带卷到达上卷初始位置，且开卷机打开，则进入上卷状态
-            coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
-            if status == TrackingStatus.TRACKING and coil is not None:
-                if not self.coil_tracker.coil_within_route:
-                    self.coil_tracker.restart_tracking()
-                # 当带卷位置小于1800时，认为开始上卷
-                elif coil[0] < TRACKING_BEGIN_X and (RUN_AS_DEMO or plc.support_open):
-                    self.loading_stage = LoadStage.MOVING_TO_UNPACKER
-                    self.uploading_start_time = datetime.datetime.now()
-        elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-            # 跟踪带卷位置
-            # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
-            # 如果带卷位置小于上卷终止位置，则进入下一阶段，检测带卷是否已装入开卷机
-            coil, status = self.coil_tracker.analyze_one_frame(frame, plc)
-            if status != TrackingStatus.TRACKING:
-                self.loading_stage = LoadStage.WAITING_4_LOADING
-                # 注意，这里要告警！！！！
-            elif coil[0] < end_keypoint[0]:
-                self.loading_stage = LoadStage.INTO_UNPACKER
-                self.coil_tracker.restart_tracking()
-        elif self.loading_stage == LoadStage.INTO_UNPACKER:
-            if self.coil_pos_status.analyze_one_frame(frame):
-                self.loading_stage = LoadStage.UNPACKING
-        elif self.loading_stage == LoadStage.UNPACKING:
-            if self.coil_open_status.analyze_one_frame(frame):
-                self.loading_stage = LoadStage.WAITING_4_LOADING
-
-    def run(self):
-        while not self.__terminated:
-            # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
-            begin_time = time.perf_counter()
-            self.__track_one_frame(frame=self.__frame_gray, plc=self.plc)
-            self.car_ctrl()
-
-            # 向PLC写带卷位置q
-            if self.coil_tracker.coil_ellipse is not None:
-                self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
-                # 没有跟踪数据时上传什么??
-            self.track_ctrl_time = int((time.perf_counter() - begin_time) * 1000)
-
-    def analyze_one_frame(self, frame):
-        
-
-
-class AutoLoader(object):
-    def __init__(self, run_as_monitor=False):
-        self.run_as_monitor = run_as_monitor
 
         # 初始化plc和摄像头硬件
         self.plc = None
         self.camera = None
         self.__init_hardwares()
 
-        # 建立跟踪线程
-        self.__loader = AutoLoadThread()
+        self.demo_video = None    # 当前的demo视频
+        self.uploading_start_time = None  # 上卷开始时间
+
+        # 以下变量主要在demo中使用到
+        self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
+        self.proc_start_time = 0.0                           # 本次控制周期开始时间
 
         # 试验测试中，如果需要存储每个视频的带卷轨迹数据，则设置save_trace=True
         # 正常现场测试时，默认存储带卷轨迹
@@ -300,7 +425,7 @@ class AutoLoader(object):
         self.track_ctrl_time = 0
         self.show_video_time = 0
 
-        self.show = ShowThread()
+        self.show = ShowThread(loader=self, plc=self.plc)
         self.show.start()
 
     def __del__(self):
@@ -310,6 +435,23 @@ class AutoLoader(object):
             self.camera.close()
         if self.show is not None:
             self.camera.close()
+
+    def __load_models(self):
+        # self.coil_tracker是核心跟踪器
+        self.coil_tracker = CenterTracer()
+        self.coil_tracker.load_model(PYTHON_PATH + "带卷定位_有干扰_2022-08-05-16-05.pt")
+        self.coil_tracker.coil_exist.load_model(PYTHON_PATH + "带卷存在2022-05-25-16-16.pt")
+        self.coil_tracker.coil_locator.load_model(PYTHON_PATH + "带卷初始位置2023-02-10-19-37.pt")    # 鞍座检测器，判断带卷是否在鞍座上
+
+        # 上卷检测器
+        self.coil_pos_status = CoilPosStatus(src_size=1200, src_position=(0, 800))
+        self.coil_pos_status.init_model()
+        self.coil_pos_status.load_model(PYTHON_PATH + "上卷检测2020-10-24-16-30.pt")
+
+        # 开卷检测器
+        self.coil_open_status = CoilOpenStatus(src_size=1200, src_position=(0, 800))
+        self.coil_open_status.init_model()
+        self.coil_open_status.load_model(PYTHON_PATH + "开卷检测2020-10-24-12-12.pt")
 
     def __init_hardwares(self):
         # 初始化并启动plc
@@ -336,26 +478,9 @@ class AutoLoader(object):
     def show_text(image, text, pos, color=(0, 255, 0)):
         cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
-    def __init_record(self, frame):
-        """
-        初始化测试记录，包括原始视频、跟踪处理视频，以及csv数据
-        :param frame:
-        :return:
-        """
-        self.record_root_path = RECORD_ROOT_PATH + "\\" + datetime.datetime.now().strftime("%Y-%m-%d")
-        if not os.path.exists(self.record_root_path):
-            os.makedirs(self.record_root_path)
-
-        time_string = datetime.datetime.now().strftime("%H-%M-%S")
-        self.record_root_path += "\\" + time_string
-        os.makedirs(self.record_root_path)
-
-        size = (frame.shape[1], frame.shape[0])
-        self.__video_orig = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-original.mp4",
-                                            cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        self.__video_proc = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-processed.mp4",
-                                            cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        # self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
+    @staticmethod
+    def proc_time(begin_time):
+        return int((time.perf_counter() - begin_time) * 1000)
 
     def control(self):
         self.init_one_cycle()
@@ -374,28 +499,21 @@ class AutoLoader(object):
             if frame_gray is None:
                 break
             frame_proc = color_image(frame_gray)
-
-            # 在现场实测时，一旦开始上卷，则记录原始视频
-            # if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING and self.video_raw is not None:
-            #     self.video_raw.write(frame_bgr)
-            self.read_write_frame_time = int((time.perf_counter() - begin_time) * 1000)
+            self.read_write_frame_time = self.proc_time(begin_time)
 
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
             begin_time = time.perf_counter()
             self.track_one_frame(frame=frame_gray, plc=self.plc)
             self.car_ctrl()
 
-            # 向PLC写带卷位置q
+            # 向PLC写带卷位置
             if self.coil_tracker.coil_ellipse is not None:
                 self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
                 # 没有跟踪数据时上传什么??
-            self.track_ctrl_time = int((time.perf_counter() - begin_time) * 1000)
+            self.track_ctrl_time = self.proc_time(begin_time)
 
             # 显示控制信息和操作按钮
             begin_time = time.perf_counter()
-            text_top = self.show_old_loading_info(frame=frame_proc, text_top=60)
-            self.show_loading_info(frame=frame_proc, text_top=text_top)
-            self.show_key_operations(frame_proc, text_top=text_top + 400)
 
             # 在现场实测时，一旦开始上卷，同时记录实际控制视频
             if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING:
@@ -409,19 +527,7 @@ class AutoLoader(object):
                 self.csv.record_plc(self.plc)
                 self.csv.write_file()
 
-            if self.coil_tracker.img_fitting is not None:
-                img = self.coil_tracker.img_fitting
-                frame_proc[0: img.shape[0], frame_proc.shape[1] - img.shape[1]: frame_proc.shape[1]] = img[:, :]
-            if self.coil_tracker.img_exp_fitting is not None:
-                img = self.coil_tracker.img_exp_fitting
-                frame_proc[img.shape[0]: img.shape[0] * 2, frame_proc.shape[1] - img.shape[1]: frame_proc.shape[1]] \
-                    = img[:, :]
-
-            if self.loading_stage != LoadStage.WAITING_4_LOADING:
-                self.show.save_record = True
-            else:
-                self.show.save_record = False
-                self.snap_shot = True
+            self.show.save_record = self.loading_stage != LoadStage.WAITING_4_LOADING
             self.show.show_frame(frame_gray, frame_proc)
 
             # 带卷到达基坑底部后截图
@@ -440,77 +546,7 @@ class AutoLoader(object):
             #     break
             # else:
             #     self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
-            self.show_video_time = int((time.perf_counter() - begin_time) * 1000)
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def save_video(self, frame):
-        if self.saving_video:
-            if self.video_save is None:
-                datetime_str = self.datetime_string()
-                size = (frame.shape[1], frame.shape[0])
-                self.video_save = cv2.VideoWriter(self.default_saving_path + datetime_str + ".mp4",
-                                                  cv2.VideoWriter_fourcc(*'MP4V'), 10, size)
-            self.video_save.write(frame)
-            self.show_text(frame, "recording video", pos=(600, 40), color=(0, 0, 255))
-        else:
-            self.video_save = None
-
-    def record_raw_video(self, frame):
-        if self.video_raw is None:
-            self.init_record(frame)
-        self.video_raw.write(frame)
-
-    def record_proc_video(self, frame):
-        if self.video_proc is None:
-            self.init_record(frame)
-        self.video_proc.write(frame)
-
-
-
-    def show_key_operations(self, frame, text_top):
-        row = text_top
-        if RUN_AS_DEMO:
-            self.show_text(frame, "P(p): pause", (20, row))
-            row += 60
-            self.show_text(frame, "->: move forward", (20, row))
-            row += 60
-            self.show_text(frame, "<-: move backward", (20, row))
-            row += 60
-            self.show_text(frame, "S(s): start tracing and recording", (20, row))
-            row += 60
-            self.show_text(frame, "E(e): stop tracing and recording", (20, row))
-            row += 60
-            self.show_text(frame, "R(r): save current picture", (20, row))
-            row += 60
-            self.show_text(frame, "L(l): detect if the coil is loaded", (20, row))
-            row += 60
-            self.show_text(frame, "O(o): detect if the coil is opened", (20, row))
-            row += 60
-            self.show_text(frame, "g(G): show coil edge", (20, row))
-            row += 60
-        else:
-            self.show_text(frame, "R(r): save current picture", (20, row))
-            row += 60
-            self.show_text(frame, "s(S): manually start", (20, row))
-            row += 60
-            self.show_text(frame, "E(e): manually stop", (20, row))
-            row += 60
-            self.show_text(frame, "F(f): show edge", (20, row))
-            row += 60
-        self.show_text(frame, "Q(q): quit", (20, row))
-        row += 60
-        return row
+            self.show_video_time = self.proc_time(begin_time)
 
     def key_operate_ctrl(self, key):
         if key == ord('s') or key == ord('S'):
@@ -572,6 +608,7 @@ class AutoLoader(object):
                 elif coil[0] < 1800 and (RUN_AS_DEMO or plc.support_open):
                     self.loading_stage = LoadStage.MOVING_TO_UNPACKER
                     self.uploading_start_time = datetime.datetime.now()
+                    self.snap_shot = True
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             # 跟踪带卷位置
             # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
@@ -594,162 +631,6 @@ class AutoLoader(object):
 
     def write_plc(self):
         pass
-
-    def draw_lines(self, frame):
-        cv2.line(frame, PitMarkL1P1, PitMarkL1P2, (0, 255, 255), 8)
-        cv2.line(frame, PitMarkL2P1, PitMarkL2P2, (0, 255, 255), 8)
-        cv2.line(frame, PitMarkL3P1, PitMarkL3P2, (0, 255, 255), 8)
-
-        # 画出三条轨迹线
-        cv2.line(frame, coil_trans_begin, coil_fall_begin, (0, 255, 255), 2)
-        # cv2.line(frame, coil_trans_begin1, coil_fall_begin1, (0, 255, 255), 2)
-        cv2.line(frame, coil_fall_begin, alignment_keypoint, (0, 255, 255), 2)
-        cv2.line(frame, alignment_keypoint, end_keypoint, (0, 255, 255), 2)
-
-        # 画出平移阶段区间线
-        cv2.line(frame, stage1_up1, stage1_up2, (20, 20, 255), 2)
-        cv2.line(frame, stage1_down1, stage1_down2, (20, 20, 255), 2)
-
-        # 画出下降阶段区间线
-        cv2.line(frame, stage2_left1, stage2_left2, (20, 20, 255), 2)
-        cv2.line(frame, stage2_right1, stage2_right2, (20, 20, 255), 2)
-
-        cv2.line(frame, stage3_up1, stage3_up2, (20, 20, 255), 2)
-        cv2.line(frame, stage3_down1, stage3_down2, (20, 20, 255), 2)
-
-    def show_loading_info(self, frame, text_top):
-        # 显示当前时间
-        now = datetime.datetime.now()
-        time_str = now.strftime("%Y-%m-%d, %H:%M:%S:") + ("%03d" % int(now.microsecond * 0.001))
-        self.show_text(frame, time_str, (frame.shape[1] - 600, 40))
-
-        # 显示检测跟踪算法的主要耗时
-        proc_time = int((time.perf_counter() - self.proc_start_time) * 1000)
-        self.proc_start_time = time.perf_counter()
-
-        self.show_text(frame, "Time consumption", (20, text_top))
-        self.show_text(frame, "Total   %4d     Camera: %4d" % (proc_time, self.read_write_frame_time),
-                       (20, text_top + 40))
-        self.show_text(frame, "Edge:   %4d     CNN:     %4d" % (self.coil_tracker.edge_time, self.coil_tracker.cnn_time),
-                       (20, text_top + 80))
-        self.show_text(frame, "Fit:    %4d     Fit exp: %4d    Offset: %4d" %
-                       (self.coil_tracker.fit_time, self.coil_tracker.fit_exp_time, self.coil_tracker.offset_time),
-                       (20, text_top + 120))
-        self.show_text(frame, "Track:   %4d    Show:    %4d" % (self.track_ctrl_time, self.show_video_time),
-                       (20, text_top + 160))
-        text_top += 200
-
-        # 显示相机状态信息
-        # if not RUN_AS_DEMO and self.loading_stage != LoadStage.MOVING_TO_UNPACKER:
-        #     exp_time = self.camera.get_exposure_time()
-        #     self.show_text(frame, "Camera exposure time = %1.1fms" % (exp_time * 0.001), (20, text_top))
-        #     text_top += 40
-
-        # demo状态下，显示视频总帧数和当前帧
-        if RUN_AS_DEMO:
-            self.show_text(frame, "Video frame count = %d, current frame = %d" %
-                           (self.camera.demo_video.frame_cnt, self.camera.demo_video.cur_frame), (20, text_top))
-            text_top += 40
-
-        # 显示带卷中心附近图像的直方图
-        center = None
-        if self.coil_tracker.coil_ellipse is not None:
-            center = self.coil_tracker.coil_ellipse
-        elif self.coil_tracker.coil_locator.center is not None:
-            center = self.coil_tracker.coil_locator.center
-        if center is not None:
-            image = frame[center[1] - 256: center[1] + 256, center[0] - 256: center[0] + 256]
-            _, dist = image_histogram(image)
-            hist_img = color_image(draw_histogram(dist))
-            frame[text_top: text_top + hist_img.shape[0], 20: 20 + hist_img.shape[1]] = hist_img[:, :]
-            text_top += 100 + 40
-
-        # 绘制定位辅助线
-        self.draw_lines(frame)
-
-        # 正在跟踪带卷，显示跟踪状态信息
-        status_str = ""
-        if self.coil_tracker.tracking_status == TrackingStatus.TRACKING:
-            # 带卷跟踪中，显示带卷的中心轨迹，以及跟踪误差
-            status_str = "Tracking coil"
-            self.coil_tracker.show_trace(frame)
-            ellipse = self.coil_tracker.coil_ellipse
-            if ellipse is not None:
-                status_str += ", center = (%d, %d), ellipse error = %5.1f, movement error = %5.1f" % \
-                              (ellipse[0], ellipse[1],
-                               self.coil_tracker.err_ellipse * 100.0,
-                               self.coil_tracker.err_movement * 100.0)
-        elif self.coil_tracker.tracking_status == TrackingStatus.NO_COIL:
-            status_str = "No coil"
-        elif self.coil_tracker.tracking_status == TrackingStatus.LOCATING:
-            status_str = "Initializing coil center"
-            init_center = self.coil_tracker.coil_locator.center
-            if init_center is not None:
-                cv2.circle(frame, center=(init_center[0], init_center[1]), radius=5, color=(0, 0, 255), thickness=2)
-        self.show_text(frame, status_str, (20, text_top))
-        text_top += 40
-
-        status_str = ""
-        if self.loading_stage == LoadStage.WAITING_4_LOADING:
-            # 在图像上显示带卷中心位置
-            status_str = "Waiting to be loaded"
-        elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-            status_str = "Moving to the unpacker"
-        elif self.loading_stage == LoadStage.INTO_UNPACKER:
-            status_str = "Loading to the unpacker, " + ("loaded" if self.coil_pos_status.status else "not loaded")
-        elif self.loading_stage == LoadStage.UNPACKING:
-            status_str = "Opening the coil, " + "opened" if self.coil_open_status.status else "not opened"
-        self.show_text(frame, status_str, (20, text_top))
-        text_top += 40
-
-        return text_top
-
-    def show_old_loading_info(self, frame, text_top):
-        self.show_text(frame, "Mode0:", (10, text_top + 40), (20, 255, 255))
-        self.show_text(frame, "Rbt :", (10, text_top + 90), (20, 255, 255))
-        self.show_text(frame, "%", (240, text_top + 90), (20, 255, 255))
-
-        # 小车行动命令
-        self.show_text(frame, "In  : %d" % self.plc.car_forward , (10, text_top + 140), (20, 255, 255))
-        self.show_text(frame, "Out : %d" % self.plc.car_backward, (10, text_top + 190), (20, 255, 255))
-        self.show_text(frame, "Up  : %d" % self.plc.car_up,       (10, text_top + 240), (20, 255, 255))
-        self.show_text(frame, "Down: %d" % self.plc.car_down,     (10, text_top + 290), (20, 255, 255))
-
-        # 卷筒状态: 1：涨径; 0：缩径
-        self.show_text(frame, "Expand: %d" % self.plc.PayoffCoilBlock_Expand, (300, text_top + 40), (20, 255, 255))
-
-        # 压辊状态: 1：压下; 0：抬起
-        self.show_text(frame, "jamroll: %d" % self.plc.JammingRoll_State, (300, text_top + 90), (20, 255, 255))
-
-        # 支撑状态: 1：打开; 0：关闭
-        self.show_text(frame, "support: %d" % self.plc.PayoffSupport_Open, (300, text_top + 140), (20, 255, 255))
-
-        # 导板状态: 1：抬起; 0：放下
-        self.show_text(frame, "board  : %d" % self.plc.GuideBoard_Up, (300, text_top + 190), (20, 255, 255))
-
-        # 卷筒旋转: 1：正转; 2：反转; 0：不动
-        if self.plc.Payoff_PositiveRun:
-            self.show_text(frame, "block  : 1", (300, text_top + 240), (20, 255, 255))
-        elif self.plc.Payoff_NegativeRun:
-            self.show_text(frame, "block  : 2", (300, text_top + 240), (20, 255, 255))
-        else:
-            self.show_text(frame, "block  : 0", (300, text_top + 240), (20, 255, 255))
-
-        # 导板伸缩: 1：伸出; 0：缩回
-        self.show_text(frame, "tongue : %d" % self.plc.GuideBoard_Extend, (300, text_top + 290), (20, 255, 255))
-
-        # 内径圆圆心坐标
-        ellipse = self.coil_tracker.coil_ellipse
-        if ellipse is not None:
-            self.show_text(frame, "x: %d" % ellipse[0], (10, text_top + 360), (20, 255, 255))
-            self.show_text(frame, "y: %d" % ellipse[1], (300, text_top + 360), (20, 255, 255))
-            """
-            # 模糊度百分比
-            self.show_text(frame, to_string(D.definition_rate), (2900, 1970), (20, 255, 255))
-            self.show_text(frame, "%", (3000, 1970), (20, 255, 255))
-            """
-
-        return text_top + 360 + 40
 
     def test_demo(self, video_file_name):
         # 打开视频文件
