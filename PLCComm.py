@@ -19,6 +19,8 @@ class PLCComm(threading.Thread):
         self.lock = threading.RLock()
         self.terminated = False
         self.__tcp = None
+        self.__event = threading.Event()
+        self.__read_plc = True
         self.connected = False
         self.__lst_send_time = datetime.datetime.now()
         self.__csv = None
@@ -409,18 +411,40 @@ class PLCComm(threading.Thread):
 
         return self.__send_tcp(self.__buf_write)
 
+    def read(self):
+        self.__read_plc = True
+        self.__event.set()
+
+    def write(self):
+        self.__read_plc = False
+        self.__event.set()
+
     def run(self):
-        if self.run_as_demo:
-            while not self.terminated:
-                time.sleep(0.02)
-        else:
+        if not self.run_as_demo:
             self.connect()
-            while not self.terminated:
-                time.sleep(0.1)
-                self.refresh_status()
-                time.sleep(0.1)
-                if not self.send_order():
-                    self.connect()
+
+        fail_times = 0
+        while not self.terminated:
+            if not self.__event.wait(0.1):
+                continue
+            self.__event.clear()
+
+            # 在每个控制周期中，先从PLC中读取当前控制状态，然后对图像进行分析，根据分析结果向PLC写控制指令
+            if not self.run_as_demo:
+                success = True
+                if self.__read_plc:
+                    time.sleep(0.02)
+                    success = self.refresh_status()
+                else:
+                    success = self.send_order()
+
+                if success:
+                    fail_times = 0
+                else:
+                    fail_times += 1
+                    if fail_times > 3:
+                        self.connect()
+                        fail_times = 0
 
 
 if __name__ == '__main__':

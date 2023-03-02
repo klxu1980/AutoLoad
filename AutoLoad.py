@@ -36,6 +36,9 @@ class CameraThread(threading.Thread):
         threading.Thread.__init__(self)
         if demo_video_file is None:
             self.camera = HKCamera()
+            # self.camera.set_Value(param_type="float_value", node_name="FrameRate", node_value=6)
+            # self.camera.set_Value(param_type="float_value", node_name="ExposureTime", node_value=100000)
+            # self.camera.set_exposure_time(100000)
         else:
             self.camera = None
             self.demo_video = VideoPlayer(demo_video_file)
@@ -77,11 +80,11 @@ class CameraThread(threading.Thread):
             if self.__event.wait(timeout=0.1):
                 self.__event.clear()
 
+                self.__lock.acquire()
                 begin_time = time.perf_counter()
                 frame = self.__read_one_frame()
                 self.frame_time = int((time.perf_counter() - begin_time) * 1000)
 
-                self.__lock.acquire()
                 self.__frame = frame
                 self.__refreshed = True
                 self.__lock.release()
@@ -94,7 +97,7 @@ class CameraThread(threading.Thread):
         self.__lock.release()
 
         self.__event.set()
-        return frame, refreshed
+        return frame, refreshed, self.frame_time
 
     def close(self):
         self.__terminated = True
@@ -112,6 +115,20 @@ class ShowThread(threading.Thread):
         self.__frame_proc = None
         self.__video_orig = None
         self.__video_proc = None
+        self.__lst_stage = LoadStage.WAITING_4_LOADING
+        self.__snap_shot = False
+
+        self.__process_time = 0
+        self.__frame_time = 0
+        self.__read_write_frame_time = 0
+        self.__track_ctrl_time = 0
+        self.__show_video_time = 0
+        self.__edge_time = 0
+        self.__cnn_time = 0
+        self.__fit_time = 0
+        self.__fit_exp_time = 0
+        self.__offset_time = 0
+
         self.save_record = False          # 是否存储视频和csv记录
         self.record_root_path = None      # 当前记录路径
         self.key_input = 0                # 窗口按键
@@ -130,7 +147,14 @@ class ShowThread(threading.Thread):
                                             cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
         self.__video_proc = cv2.VideoWriter(self.record_root_path + "\\" + time_string + "-processed.mp4",
                                             cv2.VideoWriter_fourcc(*'MP4V'), 5, size)
-        # self.plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
+
+        self.__plc.new_csv_record(self.record_root_path + "\\" + time_string + "-csvdata.csv")
+
+    @staticmethod
+    def __datetime_string():
+        now = datetime.datetime.now()
+        datetime_str = "%04d%02d%02d%02d%02d%02d" % (now.year, now.month, now.day, now.hour, now.minute, now.second)
+        return datetime_str
 
     @staticmethod
     def __show_text(image, text, pos, color=(0, 255, 0)):
@@ -248,7 +272,7 @@ class ShowThread(threading.Thread):
         self.__show_text(frame, "jamroll: %d" % self.__plc.JammingRoll_State, (300, text_top + 90), (20, 255, 255))
 
         # 支撑状态: 1：打开; 0：关闭
-        self.__show_text(frame, "support: %d" % self.__plc.PayoffSupport_Open, (300, text_top + 140), (20, 255, 255))
+        self.__show_text(frame, "support: %d" % self.__plc.support_open, (300, text_top + 140), (20, 255, 255))
 
         # 导板状态: 1：抬起; 0：放下
         self.__show_text(frame, "board  : %d" % self.__plc.GuideBoard_Up, (300, text_top + 190), (20, 255, 255))
@@ -309,15 +333,15 @@ class ShowThread(threading.Thread):
     def __show_proc_time(self, frame, text_top):
         loader = self.__loader
         self.__show_text(frame, "Time consumption", (20, text_top))
-        self.__show_text(frame, "Total   %4d     Camera: %4d" % (0, loader.read_write_frame_time),
-                       (20, text_top + 40))
+        self.__show_text(frame, "Total   %4d     Frame:   %4d    Camera:   %4d" %
+                         (self.__process_time, self.__frame_time, self.__read_write_frame_time), (20, text_top + 40))
         self.__show_text(frame, "Edge:   %4d     CNN:     %4d" %
-                         (loader.coil_tracker.edge_time, loader.coil_tracker.cnn_time), (20, text_top + 80))
+                         (self.__edge_time, self.__cnn_time), (20, text_top + 80))
         self.__show_text(frame, "Fit:    %4d     Fit exp: %4d    Offset: %4d" %
-                       (self.__loader.coil_tracker.fit_time, loader.coil_tracker.fit_exp_time, loader.coil_tracker.offset_time),
+                       (self.__fit_time, self.__fit_exp_time, self.__offset_time),
                        (20, text_top + 120))
         self.__show_text(frame, "Track:   %4d    Show:    %4d" %
-                         (loader.track_ctrl_time, loader.show_video_time), (20, text_top + 160))
+                         (self.__track_ctrl_time, self.__show_video_time), (20, text_top + 160))
         text_top += 200
         return text_top
 
@@ -342,44 +366,70 @@ class ShowThread(threading.Thread):
                 continue
             self.__event.clear()
 
+            # 将原始灰度图转换为彩色图
+            frame_proc = color_image(self.__frame_orig)
+
             # 显示当前时间
             now = datetime.datetime.now()
             time_str = now.strftime("%Y-%m-%d, %H:%M:%S:") + ("%03d" % int(now.microsecond * 0.001))
-            self.__show_text(self.__frame_proc, time_str, (20, 40))
+            self.__show_text(frame_proc, time_str, (20, 40))
 
             text_top = 80
-            text_top = self.__show_old_loading_info(self.__frame_proc, text_top)
-            text_top = self.__show_tracking_error(self.__frame_proc, text_top)
-            text_top = self.__show_proc_time(self.__frame_proc, text_top)
-            text_top = self.__show_tracking_info(self.__frame_proc, text_top)
-            text_top = self.__show_loading_status(self.__frame_proc, text_top)
-            text_top = self.__draw_histgram(self.__frame_orig, self.__frame_proc, text_top)
-            self.__show_key_operations(self.__frame_proc, text_top)
+            text_top = self.__show_old_loading_info(frame_proc, text_top)
+            text_top = self.__show_tracking_error(frame_proc, text_top)
+            text_top = self.__show_proc_time(frame_proc, text_top)
+            text_top = self.__show_tracking_info(frame_proc, text_top)
+            text_top = self.__show_loading_status(frame_proc, text_top)
+            text_top = self.__draw_histgram(self.__frame_orig, frame_proc, text_top)
+            self.__show_key_operations(frame_proc, text_top)
 
-            self.__draw_coil_trace(self.__frame_proc)
-            self.__draw_lines(self.__frame_proc)
-            self.__draw_fitting(self.__frame_proc)
+            self.__draw_lines(frame_proc)
+            self.__draw_coil_trace(frame_proc)
+            self.__draw_fitting(frame_proc)
+
+            if SCREEN_SHOT_IN_PIT and not RUN_AS_DEMO and \
+                    self.__lst_stage == LoadStage.WAITING_4_LOADING and \
+                    self.__loader.loading_stage == LoadStage.MOVING_TO_UNPACKER:
+                self.__snap_shot = True
+
+            if self.__snap_shot and self.__loader.coil_tracker.coil_ellipse is not None and \
+                    self.__loader.coil_tracker.coil_ellipse[1] > 1500 and \
+                    self.__loader.coil_tracker.coil_ellipse[0] < 1420:
+                cv2.imwrite(self.record_root_path + "\\" + self.__datetime_string() + "-processed.jpg", frame_proc)
+                self.__snap_shot = False
 
             if self.save_record:
                 if self.__video_orig is None:
-                    self.__init_record(self.__frame_proc)
+                    self.__init_record(frame_proc)
                 self.__video_orig.write(color_image(self.__frame_orig))
-                self.__video_proc.write(self.__frame_proc)
+                self.__video_proc.write(frame_proc)
+                self.__plc.add_csv_record()
             else:
                 self.__video_orig = None
                 self.__video_proc = None
 
             # 视频显示
-            frame_resized = cv2.resize(self.__frame_proc,
-                                       (SCREEN_WIDTH, SCREEN_WIDTH * self.__frame_proc.shape[0] // self.__frame_proc.shape[1]))
+            frame_resized = cv2.resize(frame_proc,
+                                       (SCREEN_WIDTH, SCREEN_WIDTH * frame_proc.shape[0] // frame_proc.shape[1]))
             cv2.imshow("control monitor", frame_resized)
 
             # key operation
             self.key_input = cv2.waitKeyEx(10)
 
-    def show_frame(self, frame_orig, frame_proc):
-        self.__frame_orig = frame_orig.copy()
-        self.__frame_proc = frame_proc.copy()
+    def show_frame(self, frame_orig):
+        self.__frame_orig = frame_orig
+
+        self.__process_time = self.__loader.process_time
+        self.__frame_time = self.__loader.frame_time
+        self.__read_write_frame_time = self.__loader.read_write_frame_time
+        self.__track_ctrl_time = self.__loader.track_ctrl_time
+        self.__show_video_time = self.__loader.show_video_time
+        self.__edge_time = self.__loader.coil_tracker.edge_time
+        self.__cnn_time = self.__loader.coil_tracker.cnn_time
+        self.__fit_time = self.__loader.coil_tracker.fit_time
+        self.__fit_exp_time = self.__loader.coil_tracker.fit_exp_time
+        self.__offset_time = self.__loader.coil_tracker.offset_time
+
         self.__event.set()
 
     def close(self):
@@ -395,17 +445,26 @@ class AutoLoader(object):
         self.__load_models()
         self.coil_tracker.read_trace_stat("trace_stat.csv")
 
-        # 初始化plc和摄像头硬件
+        # 初始化plc、摄像头硬件，以及显示线程
         self.plc = None
         self.camera = None
+        self.show = None
         self.__init_hardwares()
 
-        self.demo_video = None    # 当前的demo视频
-        self.uploading_start_time = None  # 上卷开始时间
+        self.show = ShowThread(loader=self, plc=self.plc)
+        self.show.start()
 
-        # 以下变量主要在demo中使用到
-        self.loading_stage = LoadStage.WAITING_4_LOADING     # 自动上卷的各个阶段
-        self.proc_start_time = 0.0                           # 本次控制周期开始时间
+        # 上卷状态机
+        self.loading_stage = LoadStage.WAITING_4_LOADING  # 自动上卷的各个阶段
+        self.uploading_start_time = time.perf_counter()   # 上卷开始时间，用于在监视模式下，算法出现错误后长时间处于上卷状态
+        self.proc_start_time = time.perf_counter()        # 本次控制周期开始时间，用于计算控制周期
+
+        # 各个阶段耗时，统计显示用
+        self.frame_time = 0
+        self.process_time = 0
+        self.read_write_frame_time = 0
+        self.track_ctrl_time = 0
+        self.show_video_time = 0
 
         # 试验测试中，如果需要存储每个视频的带卷轨迹数据，则设置save_trace=True
         # 正常现场测试时，默认存储带卷轨迹
@@ -413,20 +472,7 @@ class AutoLoader(object):
         self.save_trace = False
 
         # 保存带卷轨迹跟踪视频
-        self.default_saving_path = "e:\\NewTest\\"
         self.saving_video = False
-        self.video_save = None
-
-        self.video_raw = None      # 原始未处理图像视频
-        self.video_proc = None     # 处理后的图像视频
-
-        # 各个阶段耗时
-        self.read_write_frame_time = 0
-        self.track_ctrl_time = 0
-        self.show_video_time = 0
-
-        self.show = ShowThread(loader=self, plc=self.plc)
-        self.show.start()
 
     def __del__(self):
         if self.plc is not None:
@@ -469,16 +515,6 @@ class AutoLoader(object):
                 exit(0)
 
     @staticmethod
-    def datetime_string():
-        now = datetime.datetime.now()
-        datetime_str = "%04d%02d%02d%02d%02d%02d" % (now.year, now.month, now.day, now.hour, now.minute, now.second)
-        return datetime_str
-
-    @staticmethod
-    def show_text(image, text, pos, color=(0, 255, 0)):
-        cv2.putText(image, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
-
-    @staticmethod
     def proc_time(begin_time):
         return int((time.perf_counter() - begin_time) * 1000)
 
@@ -486,19 +522,23 @@ class AutoLoader(object):
         self.init_one_cycle()
         self.coil_tracker.restart_tracking()
         self.proc_start_time = time.perf_counter()
-        self.snap_shot = True
 
         while True:
+            self.process_time = self.proc_time(self.proc_start_time)
+            self.proc_start_time = time.perf_counter()
+
+            # 控制周期开始时，首先启动读PLC
+            self.plc.read()
+
             # 实际控制时，从摄像头中读取一帧。示例和测试时，从视频文件中读取一帧。
             # 摄像头读取的数据为灰度图，为了显示清晰，将用于显示的图像调整为彩色图
             begin_time = time.perf_counter()
-            frame_gray, new_frame = self.camera.get_one_frame()
+            frame_gray, new_frame, self.frame_time = self.camera.get_one_frame()
             if not new_frame:
                 time.sleep(0.01)
                 continue
             if frame_gray is None:
                 break
-            frame_proc = color_image(frame_gray)
             self.read_write_frame_time = self.proc_time(begin_time)
 
             # 基于当前帧图像和PLC反馈信息，进行带卷跟踪
@@ -510,43 +550,18 @@ class AutoLoader(object):
             if self.coil_tracker.coil_ellipse is not None:
                 self.plc.copy_coil_ellipse(self.coil_tracker.coil_ellipse)
                 # 没有跟踪数据时上传什么??
+            # self.plc.write()
             self.track_ctrl_time = self.proc_time(begin_time)
 
             # 显示控制信息和操作按钮
             begin_time = time.perf_counter()
-
-            # 在现场实测时，一旦开始上卷，同时记录实际控制视频
-            if not RUN_AS_DEMO and self.loading_stage != LoadStage.WAITING_4_LOADING:
-                # if self.video_proc is not None:
-                #     self.video_proc.write(frame_bgr)
-                self.plc.add_csv_record()
-
-            # 记录上卷期间带卷跟踪、PLC的状态
-            if self.csv is not None and self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
-                self.csv.record_tracking(self.coil_tracker)
-                self.csv.record_plc(self.plc)
-                self.csv.write_file()
-
             self.show.save_record = self.loading_stage != LoadStage.WAITING_4_LOADING
-            self.show.show_frame(frame_gray, frame_proc)
-
-            # 带卷到达基坑底部后截图
-            if SCREEN_SHOT_IN_PIT and not RUN_AS_DEMO and self.coil_tracker.coil_ellipse is not None and \
-                    self.coil_tracker.coil_ellipse[1] > 1500 and self.coil_tracker.coil_ellipse[0] < 1420 and \
-                    self.snap_shot:
-                cv2.imwrite(self.show.record_root_path + "\\" + self.datetime_string() + "-processed.jpg", frame_proc)
-                self.snap_shot = False
-
-            # # key operation
-            # key = cv2.waitKeyEx(0 if self.camera.paused else 1)
-            # if key == ord('R') or key == ord('r'):
-            #     cv2.imwrite(self.datetime_string() + "-processed.jpg", frame_bgr)
-            #     cv2.imwrite("E:\\ScreenShot\\" + self.datetime_string() + "-processed.jpg", frame_bgr)
-            # elif key == ord('q') or key == ord('Q'):
-            #     break
-            # else:
-            #     self.key_operate_demo(key) if RUN_AS_DEMO else self.key_operate_ctrl(key)
+            self.show.show_frame(frame_gray)
             self.show_video_time = self.proc_time(begin_time)
+
+            # 按键操作
+            if self.show.key_input in (ord('q'), ord('Q')):
+                break
 
     def key_operate_ctrl(self, key):
         if key == ord('s') or key == ord('S'):
@@ -580,15 +595,12 @@ class AutoLoader(object):
         :return: 无
         """
         self.loading_stage = LoadStage.WAITING_4_LOADING
-        self.uploading_start_time = None
-        self.video_raw = None
-        self.video_proc = None
         self.csv = None
 
     def track_one_frame(self, frame, plc):
         # 在监视模式下，上卷终止有可能判断错误，导致始终处于上卷状态
         # 因此，判断上卷开始后，开始计时，如果3分钟内还没有结束，则强制进入等待上卷状态
-        if self.uploading_start_time is not None and (datetime.datetime.now() - self.uploading_start_time).seconds > 600:
+        if self.loading_stage != LoadStage.WAITING_4_LOADING and self.proc_time(self.uploading_start_time) // 1000 > 600:
             self.loading_stage = LoadStage.WAITING_4_LOADING
             self.coil_tracker.restart_tracking()
 
@@ -607,8 +619,7 @@ class AutoLoader(object):
                 # 当带卷位置小于1800时，认为开始上卷
                 elif coil[0] < 1800 and (RUN_AS_DEMO or plc.support_open):
                     self.loading_stage = LoadStage.MOVING_TO_UNPACKER
-                    self.uploading_start_time = datetime.datetime.now()
-                    self.snap_shot = True
+                    self.uploading_start_time = time.perf_counter()
         elif self.loading_stage == LoadStage.MOVING_TO_UNPACKER:
             # 跟踪带卷位置
             # 如果跟踪中断(回到无带卷，或初始化带卷位置)，则重新回到等待上卷阶段
@@ -635,10 +646,8 @@ class AutoLoader(object):
     def test_demo(self, video_file_name):
         # 打开视频文件
         # 如果需要保存轨迹，则建立新的csv文件
-        self.video_name = video_file_name
         self.camera = CameraThread(video_file_name)
         self.camera.start()
-        # self.demo_video = VideoPlayer(video_file_name)
         if self.save_trace:
             csv_file = open(self.demo_video.file_name + "_new.csv", "w", newline='')
             self.csv = csv.writer(csv_file)

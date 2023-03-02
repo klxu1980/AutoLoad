@@ -385,7 +385,7 @@ class CenterTracer(object):
         # 对带卷附近区域做边缘提取
         begin_time = time.perf_counter()
         sub_img_size = self.WINDOW_SIZE + 50
-        sub_img = get_sub_image(frame, center=init_ellipse, img_size=sub_img_size)
+        sub_img = get_sub_image(frame, center=init_ellipse, img_size=sub_img_size)   # 这里可能会返回None，需要加以处理
         sub_img_cpy = sub_img.copy()
         embed_sub_image(img=frame, sub_img=edge_image(sub_img), center=init_ellipse)
         self.edge_time = int((time.perf_counter() - begin_time) * 1000)
@@ -398,6 +398,7 @@ class CenterTracer(object):
         # 刚开始跟踪带卷时，精度可能较差，先不做精细拟合处理
         if self.ellipse_cnn[0] > self.noise_filter_begin:
             self.ellipse_vision = self.ellipse_cnn
+            embed_sub_image(img=frame, sub_img=sub_img_cpy, center=init_ellipse)
             return self.ellipse_vision
 
         # 找出该位置的的期望椭圆，计算椭圆掩膜，
@@ -618,7 +619,9 @@ class CenterTracer(object):
 
         if self.tracking_status == TrackingStatus.LOCATING:
             center = self.coil_locator.analyze_one_frame(frame)
-            if TRACKING_BEGIN_X < center[0]:   # < coil_trans_begin[0]:   # 当带卷初始位置在堆料区时，初始化带卷跟踪
+            # 当带卷初始位置在堆料区时，初始化带卷跟踪
+            if TRACKING_BEGIN_RANGE[0] < center[0] < TRACKING_BEGIN_RANGE[2] and \
+                    TRACKING_BEGIN_RANGE[1] < center[1] < TRACKING_BEGIN_RANGE[3]:
                 self.__init_one_cycle(init_ellipse=(center[0], center[1], 100, 100, 0))
                 self.tracking_status = TrackingStatus.TRACKING
                 self.tracking_frame_id = 0

@@ -40,13 +40,14 @@ AIMING_BEGIN = (1450, 1450)      # 带卷对准开卷机的检测开始和停止
 AIMING_END = end_keypoint[0]
 
 # 根据现场状况增加的参数
-TRACKING_BEGIN_X = 1800       # 带卷初始定位超过该位置时，进入到带卷跟踪状态
+TRACKING_BEGIN_RANGE = (1800, 300, 2200, 750)   # 带卷初始定位超过该位置时，进入到带卷跟踪状态
+
 RECORD_ROOT_PATH = "D:\\huada2#data"
 
 # 试验控制用全局参数
-RUN_AS_DEMO = True                # 用于测试或演示
+RUN_AS_DEMO = False                # 用于测试或演示
 CNN_SUB_IMAGE_CNT = 8              # 用CNN网络计算带卷内椭圆时使用的子图数量
 ELLIPSE_ANGLE_RANGE = (180, 430)   # 内椭圆角度范围(用于避开开卷机)
 SHOW_FITTING_ELLIPSE = True        # 显示椭圆拟合过程
-NO_KALMAN = False                   # 不使用卡尔曼滤波
+NO_KALMAN = True                   # 不使用卡尔曼滤波
 SCREEN_SHOT_IN_PIT = True          # 带卷到达基坑底部时自动截图
