@@ -288,18 +288,21 @@ class ShowThread(threading.Thread):
         # 导板伸缩: 1：伸出; 0：缩回
         self.__show_text(frame, "tongue : %d" % self.__plc.GuideBoard_Extend, (300, text_top + 290), (20, 255, 255))
 
+        # PLC心跳，检测是否与PLC通信正常
+        self.__show_text(frame, "PLC heartbeat: %d" % self.__plc.heartbeat, (20, text_top + 340), (20, 255, 255))
+
         # 内径圆圆心坐标
         ellipse = self.__loader.coil_tracker.coil_ellipse
         if ellipse is not None:
-            self.__show_text(frame, "x: %d" % ellipse[0], (20, text_top + 360), (20, 255, 255))
-            self.__show_text(frame, "y: %d" % ellipse[1], (300, text_top + 360), (20, 255, 255))
+            self.__show_text(frame, "x: %d" % ellipse[0], (20, text_top + 390), (20, 255, 255))
+            self.__show_text(frame, "y: %d" % ellipse[1], (300, text_top + 390), (20, 255, 255))
             """
             # 模糊度百分比
             self.__show_text(frame, to_string(D.definition_rate), (2900, 1970), (20, 255, 255))
             self.__show_text(frame, "%", (3000, 1970), (20, 255, 255))
             """
 
-        return text_top + 360 + 50
+        return text_top + 390 + 50
 
     def __show_tracking_error(self,frame, text_top):
         status_str = "Tracking error: ellipse error = %5.1f, movement error = %5.1f" % \

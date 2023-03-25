@@ -386,6 +386,10 @@ class CenterTracer(object):
         begin_time = time.perf_counter()
         sub_img_size = self.WINDOW_SIZE + 50
         sub_img = get_sub_image(frame, center=init_ellipse, img_size=sub_img_size)   # 这里可能会返回None，需要加以处理
+        if sub_img is None:
+            self.ellipse_vision = None
+            return None
+
         sub_img_cpy = sub_img.copy()
         embed_sub_image(img=frame, sub_img=edge_image(sub_img), center=init_ellipse)
         self.edge_time = int((time.perf_counter() - begin_time) * 1000)
@@ -427,6 +431,7 @@ class CenterTracer(object):
 
         # 如果预期椭圆存在，则用该椭圆拟合带卷内椭圆
         begin_time = time.perf_counter()
+        #self.ellipse_exp = None   # 暂时不做椭圆拟合
         if self.ellipse_exp is not None:
             ellipse_temp = (self.ellipse_exp[2], self.ellipse_exp[3], self.ellipse_exp[4],
                             ELLIPSE_ANGLE_RANGE[0] - self.ellipse_exp[4], ELLIPSE_ANGLE_RANGE[1] - self.ellipse_exp[4], 3)
@@ -472,6 +477,10 @@ class CenterTracer(object):
     def __track_coil(self, frame, plc, proc_interval):
         # 基于视觉方式检测带卷内椭圆
         ellipse_vision = self.__calc_coil_inner_ellipse(frame, init_ellipse=self.ellipse_kalman)
+        if ellipse_vision is None:
+            self.tracking_status = TrackingStatus.NO_COIL
+            self.coil_ellipse = None
+            return
 
         # locate coil offset by frame difference
         ox, oy = self.__offset_by_template(frame, lst_center=self.ellipse_kalman)

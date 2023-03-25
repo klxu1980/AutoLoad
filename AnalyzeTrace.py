@@ -2,7 +2,12 @@ import csv
 import glob
 import os
 import numpy as np
+from CoilImageProc import *
 import matplotlib.pyplot as plt
+
+
+"""
+"""
 
 
 def read_trace_csv_raw(file_name, raw_list):
@@ -138,6 +143,62 @@ def read_all_traces_from_one_csv(file_name):
     return all_traces
 
 
+def read_trace_labels(dir):
+    samples = {}
+    for root, dirs, files in os.walk(dir):
+        for _, file in enumerate(files):
+            if os.path.splitext(file)[-1] == ".jpg":
+                params = extract_filename_params(file)
+                if len(params) < 9:
+                    continue
+
+                center = (int(params[1]), int(params[2]))
+                if center not in samples:
+                    samples[center] = np.zeros(7, dtype=np.float32)
+                stat = samples[center]
+
+                stat[0] += 1
+                stat[1] += int(params[3])
+                stat[2] += int(params[4])
+                stat[3] += int(params[5])
+                stat[4] += int(params[6])
+                stat[5] += int(params[7])
+                stat[6] += int(params[8])
+
+    traces = []
+    for row in samples.items():
+        traces.append((row[0][0], row[0][1],
+                       int(row[1][1] / row[1][0] + 0.5),
+                       int(row[1][2] / row[1][0] + 0.5),
+                       int(row[1][3] / row[1][0] + 0.5),
+                       int(row[1][4] / row[1][0] + 0.5),
+                       int(row[1][5] / row[1][0] + 0.5),
+                       int(row[1][6] / row[1][0] + 0.5)
+                       ))
+    return traces
+
+
+def read_all_trace_labels(dir):
+    all_traces = []
+    for root, dirs, files in os.walk(dir):
+        for _, file in enumerate(files):
+            if os.path.splitext(file)[-1] == ".jpg":
+                params = extract_filename_params(file)
+                if len(params) >= 6:
+                    all_traces.append((int(params[1]), int(params[2]),
+                                       int(params[3]), int(params[4]), int(params[5])))
+    return all_traces
+
+
+def save_all_trace_labels(dir, dst_file):
+    all_traces = read_all_trace_labels(dir)
+    csv_writer = csv.writer(open(dst_file, 'w', newline=''))
+
+    for _, trace in enumerate(all_traces):
+        line = (str(trace[0]), str(trace[1]), str(trace[2]), str(trace[3]), str(trace[4]))
+        csv_writer.writerow(line)
+
+
 def calc_ellipse_avg_std(samples):
     avg = np.zeros((1, 3), dtype=np.float32)
     std = np.zeros((1, 3), dtype=np.float32)
@@ -171,6 +232,9 @@ def remove_gross_error(samples, min_sample_cnt, max_std):
 
 
 def clear_gross_error(traces, min_sample_cnt, max_std):
+    # 将所有样本组织成字典
+    # 字典的key为带卷中心位置
+    # 在同一个位置上，通常会存在一系列样本，将这些样本中与平均值误差最大的样本去掉，然后计算长轴、短轴和斜角平均值
     samples = {}
     for _, ellipse in enumerate(traces):
         center = (ellipse[0], ellipse[1])
@@ -227,11 +291,11 @@ def show_trace_stat(file_name):
 if __name__ == '__main__':
     # 如果需要把所有轨迹文件转存到一个csv文件中，则使用该代码
     #save_all_csv("E:\\20220521-20220621数据\\视频数据", "e:\\历史数据.csv")
+    #traces = read_all_traces_from_one_csv("D:\\labels.csv")
+    traces = read_trace_labels("D:\\eval")
 
-    traces = read_all_traces_from_one_csv("E:\\01 我的设计\\05 智通项目\\04 自动上卷\\历史数据.csv")
+    #max_std = np.array((5.0, 5.0, 5.0))
+    #trace_stat = clear_gross_error(traces=traces, min_sample_cnt=1, max_std=max_std)
 
-    max_std = np.array((5.0, 5.0, 5.0))
-    trace_stat = clear_gross_error(traces=traces, min_sample_cnt=5, max_std=max_std)
-
-    write_trace_stat("G:\\trace_stat.csv", trace_stat)
-    show_trace_stat("G:\\trace_stat.csv")
+    write_trace_stat("D:\\trace_stat.csv", traces)
+    show_trace_stat("D:\\trace_stat.csv")
